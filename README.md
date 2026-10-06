@@ -37,7 +37,8 @@ Dort muss `~/jellyfin-app/media/music -> /downloads` auftauchen (bzw. der Pfad, 
 ## Einrichtung
 
 ```bash
-cd music-player
+git clone https://github.com/mywifisucks123/tonspur.git ~/tonspur
+cd ~/tonspur
 cp .env.example .env
 ```
 
@@ -55,7 +56,7 @@ Optional `JELLYFIN_MUSIC_LIBRARY_ID`, damit nur die Musikbibliothek gescannt wir
 brew install node yt-dlp
 npm install -g pm2
 
-cd music-player
+cd ~/tonspur
 npm install --omit=dev
 pm2 start ecosystem.config.cjs
 pm2 save
@@ -71,7 +72,7 @@ yt-dlp regelmäßig aktualisieren, YouTube ändert ständig etwas: `brew upgrade
 ### Variante B: Docker
 
 ```bash
-cd music-player
+cd ~/tonspur
 docker compose up -d --build
 docker compose logs -f
 ```
@@ -96,7 +97,7 @@ docker compose logs -f
 ## Projektstruktur
 
 ```
-music-player/
+tonspur/
 ├── src/
 │   ├── server.js       Express-Server, alle API-Routen, liefert das Frontend aus
 │   ├── config.js       liest .env
