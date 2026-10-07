@@ -6,7 +6,9 @@ import { config } from './config.js';
 import * as deezer from './deezer.js';
 import * as jellyfin from './jellyfin.js';
 import * as yt from './ytdlp.js';
+import fs from 'node:fs/promises';
 import path from 'node:path';
+import { downloadChunked, exists, ffmpeg, ffmpegVersion, pruneDir, touch } from './media.js';
 import { Limiter, TtlCache, log, readJson, withTimeout, writeJson } from './util.js';
 
 const ytCache = new TtlCache(3 * 60 * 60 * 1000, 2000);
@@ -81,11 +83,60 @@ function youtube(track, { urgent = false } = {}) {
   );
 }
 
-/** Für Prefetch und Status-Anzeige; startet yt-dlp im Hintergrund. */
-export async function prefetch(id) {
+/** Für Prefetch: holt die YouTube-Adresse, mit `file` auch gleich die fertige Datei. */
+export async function prefetch(id, { file = false } = {}) {
   const track = await deezer.track(id);
   if (await local(track)) return;
-  if (await yt.version()) await youtube(track).catch(() => {});
+  if (!(await yt.version())) return;
+  const src = await youtube(track).catch(() => null);
+  if (src && file) await youtubeFile(id, src).catch(() => {});
+}
+
+// --- YouTube-Audio als normale Datei ---------------------------------------
+// YouTube liefert fragmentiertes MP4 (fürs Video-Streaming gebaut). Das spielt iOS nicht im
+// Hintergrund weiter. Deshalb: komplett laden (dank fester Stücke ~1 s) und mit ffmpeg
+// verlustfrei in eine normale M4A umpacken – wie Apple Music sie auch nutzt.
+
+const YT_DIR = path.join(config.cacheDir, 'yt');
+const filePending = new Map();
+
+export async function youtubeFile(id, src) {
+  const file = path.join(YT_DIR, `${id}.m4a`);
+  if (await exists(file)) {
+    touch(file);
+    return file;
+  }
+  if (!(await ffmpegVersion())) return null;
+  if (!filePending.has(id)) {
+    const job = (async () => {
+      await fs.mkdir(YT_DIR, { recursive: true });
+      const tmp = path.join(YT_DIR, `${id}.download`);
+      const out = path.join(YT_DIR, `${id}.part.m4a`);
+      const started = Date.now();
+      try {
+        try {
+          await downloadChunked(src.url, src.headers, tmp);
+        } catch (err) {
+          if (err.status !== 403 && err.status !== 410) throw err;
+          // Adresse abgelaufen → einmal neu holen
+          invalidateYoutube(id);
+          const fresh = await resolve(id);
+          if (fresh.type !== 'youtube') throw err;
+          await downloadChunked(fresh.url, fresh.headers, tmp);
+        }
+        await ffmpeg(['-y', '-loglevel', 'error', '-i', tmp, '-map', '0:a:0', '-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', out]);
+        await fs.rename(out, file);
+        log('yt-dlp', `Datei ${id} bereit (${((Date.now() - started) / 1000).toFixed(1)} s)`);
+        pruneDir(YT_DIR, config.cacheLimitMb * 1024 * 1024, (name) => filePending.has(name.split('.')[0])).catch(() => {});
+        return file;
+      } finally {
+        fs.unlink(tmp).catch(() => {});
+        fs.unlink(out).catch(() => {});
+      }
+    })().finally(() => filePending.delete(id));
+    filePending.set(id, job);
+  }
+  return filePending.get(id);
 }
 
 export async function resolve(id, { wait = true } = {}) {

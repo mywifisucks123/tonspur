@@ -118,7 +118,7 @@ class Player extends EventTarget {
       this.emit('source');
     }
     // Turbo: die nächsten Titel schon vorbereiten, damit sie ohne Wartezeit starten
-    api.prefetch(this.upcoming.slice(0, 5));
+    api.prefetch(this.upcoming.slice(0, 5), { files: 2 });
   }
 
   emitError(err) {

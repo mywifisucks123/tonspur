@@ -1,9 +1,9 @@
 // SoundCloud: Suche und Playlists über die Web-API (wie soundcloud.com selbst),
 // Audio über yt-dlp als MP3 in einen Zwischenspeicher. Kein Konto nötig.
-import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
+import { exists, ffmpeg, pruneDir, touch } from './media.js';
 import { HttpError, Limiter, TtlCache, log, readJson, writeJson } from './util.js';
 import * as yt from './ytdlp.js';
 
@@ -150,7 +150,6 @@ export async function ping() {
 
 // --- Audio -----------------------------------------------------------------
 
-const exists = (p) => fs.access(p).then(() => true, () => false);
 const pending = new Map();
 
 /** Pfad zu einer abspielbaren MP3 – aus der Bibliothek, dem Zwischenspeicher oder frisch geladen. */
@@ -159,8 +158,7 @@ export async function audioFile(id, { urgent = false } = {}) {
   if (lib && (await exists(lib))) return lib;
   const file = path.join(CACHE_DIR, `${id}.mp3`);
   if (await exists(file)) {
-    const now = new Date();
-    fs.utimes(file, now, now).catch(() => {});
+    touch(file);
     return file;
   }
   if (!pending.has(id)) {
@@ -186,22 +184,8 @@ export function prefetch(id) {
   return audioFile(id).then(() => {}, () => {});
 }
 
-/** Ältere Dateien löschen, wenn der Zwischenspeicher zu groß wird. */
-async function pruneCache() {
-  const names = await fs.readdir(CACHE_DIR);
-  const files = [];
-  for (const name of names) {
-    const st = await fs.stat(path.join(CACHE_DIR, name)).catch(() => null);
-    if (st?.isFile()) files.push({ name, size: st.size, at: st.mtimeMs });
-  }
-  let total = files.reduce((s, f) => s + f.size, 0);
-  const limit = config.cacheLimitMb * 1024 * 1024;
-  for (const f of files.sort((a, b) => a.at - b.at)) {
-    if (total <= limit) break;
-    if (pending.has(f.name.replace(/\.\w+$/, ''))) continue;
-    await fs.unlink(path.join(CACHE_DIR, f.name)).catch(() => {});
-    total -= f.size;
-  }
+function pruneCache() {
+  return pruneDir(CACHE_DIR, config.cacheLimitMb * 1024 * 1024, (name) => pending.has(name.replace(/\.\w+$/, '')));
 }
 
 // --- In die Jellyfin-Bibliothek --------------------------------------------
@@ -212,16 +196,6 @@ const safe = (s) =>
     .replace(/^\.+/, '')
     .trim()
     .slice(0, 120) || 'Unbekannt';
-
-function ffmpeg(args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(config.ffmpegBin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
-    let err = '';
-    child.stderr.on('data', (d) => (err += d));
-    child.on('error', reject);
-    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(err.trim().split('\n').pop() || `ffmpeg ${code}`))));
-  });
-}
 
 export const isInLibrary = (id) => Boolean(library[String(id)]);
 
@@ -280,12 +254,4 @@ export async function saveToLibrary(id) {
   return dest;
 }
 
-export async function ffmpegVersion() {
-  return new Promise((resolve) => {
-    const child = spawn(config.ffmpegBin, ['-version'], { stdio: ['ignore', 'pipe', 'ignore'] });
-    let out = '';
-    child.stdout.on('data', (d) => (out += d));
-    child.on('error', () => resolve(null));
-    child.on('close', (code) => resolve(code === 0 ? out.split('\n')[0].split(' ')[2] ?? 'ok' : null));
-  });
-}
+export { ffmpegVersion } from './media.js';

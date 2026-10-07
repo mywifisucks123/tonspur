@@ -43,13 +43,13 @@ export const api = {
   clearDownloads: () => request('/downloads', { method: 'DELETE' }),
   source: (id, { wait = true } = {}) => request(`/source/dz/${id}${wait ? '' : '?wait=0'}`),
   // Nimmt Track-Objekte oder Deezer-IDs; Jellyfin-Titel brauchen kein Vorladen
-  prefetch: (tracks) => {
+  prefetch: (tracks, { files = 0 } = {}) => {
     const keys = tracks
       .filter(Boolean)
       .map((t) => (typeof t === 'object' ? (t.source === 'jf' || t.local ? null : `${t.source}:${t.id}`) : `dz:${t}`))
       .filter(Boolean);
     if (!keys.length) return Promise.resolve();
-    return request('/prefetch', { method: 'POST', body: { keys } }).catch(() => {});
+    return request('/prefetch', { method: 'POST', body: { keys, files } }).catch(() => {});
   },
   scPlaylist: (id) => cached(`/sc/playlist/${id}`, 10 * 60 * 1000),
   importLink: (url) => request('/import', { method: 'POST', body: { url } }),

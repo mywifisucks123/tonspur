@@ -79,6 +79,12 @@ api.get('/stream/dz/:id', async (req, res) => {
       }));
     }
     if (src.type === 'youtube') {
+      // Bevorzugt als fertige Datei (spielt auf iOS auch im Hintergrund); ohne ffmpeg direkt durchreichen
+      const file = await resolver.youtubeFile(id, src).catch((err) => {
+        log('stream', `Datei für ${id} nicht möglich: ${err.message}`);
+        return null;
+      });
+      if (file) return res.sendFile(file, { dotfiles: 'allow', headers: { 'Cache-Control': 'no-store' } });
       const status = await proxyChunked(req, res, src.url, {
         headers: src.headers,
         contentType: src.mime,
@@ -116,7 +122,9 @@ api.post('/prefetch', (req, res) => {
   const keys = [...new Set((req.body?.keys ?? (req.body?.ids ?? []).map((id) => `dz:${id}`)).map(String))];
   const dz = keys.filter((k) => k.startsWith('dz:')).slice(0, 40);
   const sc = keys.filter((k) => k.startsWith('sc:')).slice(0, 4);
-  for (const k of dz) resolver.prefetch(k.slice(3)).catch(() => {});
+  // Der Player schickt mit `files`, wie viele davon als Nächstes laufen → die gleich als Datei laden
+  const files = Math.min(Number(req.body?.files) || 0, 3);
+  dz.forEach((k, i) => resolver.prefetch(k.slice(3), { file: i < files }).catch(() => {}));
   for (const k of sc) soundcloud.prefetch(k.slice(3));
   res.status(202).json({ ok: true, count: dz.length + sc.length });
 });
