@@ -23,14 +23,16 @@ export const favKey = (type, item) => `${type}:${item.source}:${item.id}`;
 // Favoriten
 // ---------------------------------------------------------------------------
 
-export const favs = { tracks: [], albums: [], keys: new Set() };
+export const favs = { tracks: [], albums: [], playlists: [], keys: new Set() };
 
 function setFavs(data) {
   favs.tracks = data.tracks ?? [];
   favs.albums = data.albums ?? [];
+  favs.playlists = data.playlists ?? [];
   favs.keys = new Set([
     ...favs.tracks.map((t) => favKey('track', t)),
     ...favs.albums.map((a) => favKey('album', a)),
+    ...favs.playlists.map((p) => favKey('playlist', p)),
   ]);
 }
 
@@ -57,8 +59,9 @@ export async function toggleFavorite(type, item) {
     const data = on ? await api.addFavorite(type, slim(item)) : await api.removeFavorite(type, item);
     setFavs(data);
     if (on) {
-      const what = type === 'album' ? 'Album' : 'Song';
-      toast(item.source === 'dz' ? `${what} gemerkt – wird in die Bibliothek geladen` : `${what} gemerkt`);
+      const what = type === 'album' ? 'Album' : type === 'playlist' ? 'Playlist' : 'Song';
+      const loads = type !== 'playlist' && (item.source === 'dz' || (item.source === 'sc' && type === 'track'));
+      toast(loads ? `${what} gemerkt – wird in die Bibliothek geladen` : `${what} gemerkt`);
     }
   } catch (err) {
     on ? favs.keys.delete(key) : favs.keys.add(key);
@@ -100,8 +103,8 @@ export function trackRows(tracks, { numbered = false, sub } = {}) {
         ${numbered ? `<div class="row-num">${i + 1}</div>` : img(t.coverSmall ?? t.cover, 'row-art')}
         <div class="row-meta">
           <div class="row-title">${esc(t.title)}</div>
-          <div class="row-sub">${t.explicit ? '<span class="badge-e">E</span>' : ''}${
-            t.local && t.source === 'dz' ? `<span class="local-dot" title="In deiner Bibliothek">${icons.laptop}</span>` : ''
+          <div class="row-sub">${t.source === 'sc' ? '<span class="badge-src">SC</span>' : ''}${t.explicit ? '<span class="badge-e">E</span>' : ''}${
+            t.local && t.source !== 'jf' ? `<span class="local-dot" title="In deiner Bibliothek">${icons.laptop}</span>` : ''
           }<span>${esc(subline)}</span></div>
         </div>
         ${favButton('track', t)}
@@ -115,6 +118,15 @@ function albumCard(a) {
   const sub = [a.artist, a.year].filter(Boolean).join(' · ');
   return html`<a class="card" href="${href}">${img(a.coverSmall ?? a.cover, 'card-art')}
     <div class="card-title">${esc(a.title)}</div><div class="card-sub">${esc(sub)}</div></a>`;
+}
+
+const playlistHref = (p) => (p.source === 'sc' ? `#/sc-playlist/${p.id}` : p.source === 'sp' ? `#/imported/${p.id}` : `#/playlist/${p.id}`);
+const SOURCE_NAME = { dz: 'Deezer', sc: 'SoundCloud', sp: 'Spotify' };
+
+function playlistCard(p) {
+  const sub = [p.owner, p.trackCount ? `${p.trackCount} Titel` : null].filter(Boolean).join(' · ');
+  return html`<a class="card" href="${playlistHref(p)}">${img(p.coverSmall ?? p.cover, 'card-art')}
+    <div class="card-title">${esc(p.title)}</div><div class="card-sub">${esc(sub)}</div></a>`;
 }
 
 function artistCard(a) {
@@ -177,7 +189,7 @@ export function searchView() {
       <h1 class="large-title">Suchen</h1>
       <label class="searchbar">
         ${icons.search}
-        <input type="search" placeholder="Songs, Alben, Künstler" enterkeyhint="search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        <input type="search" placeholder="Suchen oder Link einfügen" enterkeyhint="search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
         <button class="search-clear hidden" type="button" aria-label="Leeren">${icons.close}</button>
       </label>
       <div class="segmented hidden">
@@ -185,6 +197,8 @@ export function searchView() {
         <button data-filter="tracks">Songs</button>
         <button data-filter="albums">Alben</button>
         <button data-filter="artists">Künstler</button>
+        <button data-filter="playlists">Playlists</button>
+        <button data-filter="soundcloud">SoundCloud</button>
       </div>
     </header>
     <div class="search-body"></div>
@@ -210,7 +224,7 @@ export function searchView() {
       if (controller.signal.aborted) return;
       searchState.results = results;
       renderResults(body);
-      api.prefetch(results.tracks.filter((t) => !t.local).slice(0, 6).map((t) => t.id));
+      api.prefetch([...results.tracks.slice(0, 6), ...(results.soundcloud?.tracks ?? []).slice(0, 1)]);
     } catch (err) {
       if (err.name !== 'AbortError') body.innerHTML = errorBox(err);
     }
@@ -220,7 +234,13 @@ export function searchView() {
     const q = input.value.trim();
     searchState.q = q;
     clear.classList.toggle('hidden', !input.value);
-    seg.classList.toggle('hidden', !q);
+    const link = linkKind(q);
+    seg.classList.toggle('hidden', !q || Boolean(link));
+    if (link) {
+      searchState.controller?.abort();
+      body.innerHTML = importCard(q, link);
+      return;
+    }
     run(q);
   });
   input.addEventListener('keydown', (e) => {
@@ -278,21 +298,42 @@ async function renderHome(body) {
       installHint() +
       section('Top Songs', `<div class="list">${trackRows(c.tracks.slice(0, 12))}</div>`) +
       section('Top Alben', `<div class="shelf">${c.albums.map(albumCard).join('')}</div>`) +
-      section('Künstler', `<div class="shelf artists">${c.artists.map(artistCard).join('')}</div>`);
+      section('Künstler', `<div class="shelf artists">${c.artists.map(artistCard).join('')}</div>`) +
+      (c.playlists?.length ? section('Beliebte Playlists', `<div class="shelf">${c.playlists.map(playlistCard).join('')}</div>`) : '');
     markPlaying();
-    api.prefetch(c.tracks.slice(0, 4).map((t) => t.id));
+    api.prefetch(c.tracks.slice(0, 4));
   } catch (err) {
     body.innerHTML = errorBox(err);
   }
+}
+
+// Eingefügte Links (Spotify-Playlist/-Album, SoundCloud) werden importiert statt gesucht
+function linkKind(q) {
+  if (/open\.spotify\.com\/(?:intl-[a-z-]+\/)?(?:embed\/)?(playlist|album)\/|spotify:(playlist|album):/.test(q)) return 'spotify';
+  if (/(^|\/\/)(www\.|m\.|on\.)?soundcloud\.com\/\S+/.test(q)) return 'soundcloud';
+  return null;
+}
+
+function importCard(url, kind) {
+  const what = kind === 'spotify' ? 'Spotify-Link übernehmen' : 'SoundCloud-Link öffnen';
+  const text =
+    kind === 'spotify'
+      ? 'Tonspur sucht jeden Titel der Playlist bei Deezer und legt sie in deiner Bibliothek ab.'
+      : 'Song oder Playlist direkt von SoundCloud abspielen.';
+  return html`<div class="empty">${icons.download}<h3>${what}</h3><p>${text}</p>
+    <div class="actions" style="justify-content:center"><a class="btn" style="flex:0 0 auto;padding:0 22px" href="#/import?u=${encodeURIComponent(url)}">${kind === 'spotify' ? 'Übernehmen' : 'Öffnen'}</a></div></div>`;
 }
 
 function renderResults(body) {
   const r = searchState.results;
   if (!r) return;
   const { filter } = searchState;
-  const empty = !r.tracks.length && !r.albums.length && !r.artists.length && !r.local.length;
+  const playlists = r.playlists ?? [];
+  const sc = r.soundcloud ?? { tracks: [], playlists: [] };
+  const empty =
+    !r.tracks.length && !r.albums.length && !r.artists.length && !playlists.length && !r.local.length && !sc.tracks.length && !sc.playlists.length;
   if (empty) {
-    body.innerHTML = html`<div class="empty">${icons.search}<h3>Keine Treffer</h3><p>„${esc(searchState.q)}“ gibt es weder bei Deezer noch auf dem Mac Mini.</p></div>`;
+    body.innerHTML = html`<div class="empty">${icons.search}<h3>Keine Treffer</h3><p>„${esc(searchState.q)}“ gibt es weder bei Deezer, SoundCloud noch auf dem Mac Mini.</p></div>`;
     return;
   }
 
@@ -307,6 +348,14 @@ function renderResults(body) {
     }
     if (r.artists.length) out += section('Künstler', `<div class="shelf artists">${r.artists.map(artistCard).join('')}</div>`);
     if (r.albums.length) out += section('Alben', `<div class="shelf">${r.albums.map(albumCard).join('')}</div>`);
+    if (playlists.length) out += section('Playlists', `<div class="shelf">${playlists.map(playlistCard).join('')}</div>`);
+    if (sc.tracks.length) {
+      out += section(
+        'SoundCloud',
+        `<div class="list">${trackRows(sc.tracks.slice(0, 5))}</div>`,
+        '<a class="more" href="#" data-show="soundcloud">Alle</a>',
+      );
+    }
     if (r.local.length) out += section('Auf deinem Mac Mini', `<div class="list">${trackRows(r.local)}</div>`);
   } else if (filter === 'tracks') {
     out = `<div class="list" style="margin-top:8px">${trackRows(r.tracks)}</div>`;
@@ -314,6 +363,15 @@ function renderResults(body) {
     out = `<div class="grid" style="margin-top:12px">${r.albums.map(albumCard).join('')}</div>`;
   } else if (filter === 'artists') {
     out = `<div class="grid" style="margin-top:12px">${r.artists.map(artistCard).join('')}</div>`;
+  } else if (filter === 'playlists') {
+    out = playlists.length
+      ? `<div class="grid" style="margin-top:12px">${playlists.map(playlistCard).join('')}</div>`
+      : html`<div class="empty">${icons.search}<h3>Keine Playlists</h3><p>Zu „${esc(searchState.q)}“ gibt es keine öffentlichen Playlists.</p></div>`;
+  } else if (filter === 'soundcloud') {
+    out = sc.tracks.length || sc.playlists.length
+      ? (sc.tracks.length ? `<div class="list" style="margin-top:8px">${trackRows(sc.tracks)}</div>` : '') +
+        (sc.playlists.length ? section('SoundCloud-Playlists', `<div class="shelf">${sc.playlists.map(playlistCard).join('')}</div>`) : '')
+      : html`<div class="empty">${icons.search}<h3>Nichts auf SoundCloud</h3><p>${esc(sc.error ? `SoundCloud nicht erreichbar: ${sc.error}` : `Zu „${searchState.q}“ gibt es dort nichts.`)}</p></div>`;
   }
   body.innerHTML = out;
   markPlaying();
@@ -355,8 +413,82 @@ function albumMarkup(a, { downloadable }) {
 
 export async function albumView(id) {
   const a = await api.album(id);
-  api.prefetch(a.tracks.slice(0, 3).map((t) => t.id));
+  api.prefetch(a.tracks.slice(0, 30));
   return { el: view(albumMarkup(a, { downloadable: true })) };
+}
+
+export async function playlistView(id, source = 'dz') {
+  const p = source === 'sc' ? await api.scPlaylist(id) : source === 'sp' ? await api.imported(id) : await api.playlist(id);
+  const listId = registerList(p.tracks);
+  const total = p.tracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+  const kind = source === 'sp' ? `Spotify-${p.kind === 'album' ? 'Album' : 'Playlist'}` : source === 'sc' ? 'SoundCloud-Playlist' : 'Playlist';
+  const meta = [kind, `${p.tracks.length} Titel`, total ? fmtDuration(total) : null].filter(Boolean).join(' · ');
+  // Turbo: Deezer-Titel bekommen ihre Stream-Adresse vorab (billig), SoundCloud nur die ersten
+  api.prefetch(p.tracks.slice(0, source === 'sc' ? 3 : 30));
+
+  const missing = p.missing ?? [];
+  const importNote =
+    source === 'sp'
+      ? html`<div class="footnote">
+          ${missing.length ? `${missing.length} von ${p.tracks.length + missing.length} Titeln gibt es bei Deezer nicht.` : 'Alle Titel bei Deezer gefunden.'}
+          ${p.complete === false ? ' Spotify zeigt ohne Zugangsdaten nur die ersten ~100 Titel.' : ''}
+          <div class="actions" style="padding-left:0;padding-right:0">
+            <a class="btn small" href="#/import?u=${encodeURIComponent(p.link)}">Neu abgleichen</a>
+            <button class="btn small" data-remove-import="${esc(p.id)}">Entfernen</button>
+          </div>
+          ${missing.length ? `<details><summary>Nicht gefunden</summary>${missing.map((m) => `<div>${esc(m)}</div>`).join('')}</details>` : ''}
+        </div>`
+      : '';
+
+  return {
+    el: view(html`
+      ${backButton()}
+      <div class="hero">
+        <div class="hero-glow">${img(p.coverSmall ?? p.cover, '')}</div>
+        ${img(p.cover, 'hero-art', p.title)}
+        <h1>${esc(p.title)}</h1>
+        ${p.owner ? `<div class="hero-sub">${esc(p.owner)}</div>` : ''}
+        <div class="hero-meta">${esc(meta)}</div>
+      </div>
+      <div class="actions">
+        <button class="btn" data-play-list="${listId}">${icons.play} Abspielen</button>
+        <button class="btn" data-shuffle-list="${listId}">${icons.shuffle} Zufall</button>
+        ${source === 'sp' ? '' : favButton('playlist', { ...p, tracks: undefined }, 'btn fav')}
+        <button class="btn fav" data-download-playlist="${esc(p.id)}" data-source="${source}" data-count="${p.tracks.length}" aria-label="Playlist laden">${icons.download}</button>
+      </div>
+      <div class="list">${trackRows(p.tracks)}</div>
+      ${importNote}
+    `),
+  };
+}
+
+/** Spotify-/SoundCloud-Link übernehmen und zur passenden Seite weiterleiten. */
+export async function importView(url) {
+  const kind = linkKind(url);
+  const el = view(html`
+    ${backButton()}
+    <div class="empty" style="padding-top:30vh"><div class="spinner" style="margin:0 auto 18px"></div>
+      <h3>${kind === 'spotify' ? 'Spotify-Playlist wird übernommen' : 'SoundCloud-Link wird geöffnet'}</h3>
+      <p>${kind === 'spotify' ? 'Jeder Titel wird bei Deezer gesucht – bei 100 Titeln dauert das etwa 15 Sekunden.' : ''}</p></div>
+  `);
+  api
+    .importLink(url)
+    .then((r) => {
+      if (!location.hash.startsWith('#/import')) return;
+      if (r.kind === 'import') {
+        toast(`${r.found} Titel übernommen${r.missing ? `, ${r.missing} nicht gefunden` : ''}`);
+        location.replace(`#/imported/${r.id}`);
+      } else if (r.kind === 'playlist') {
+        location.replace(`#/sc-playlist/${r.id}`);
+      } else if (r.kind === 'track') {
+        player.playList([r.track], 0);
+        history.back();
+      }
+    })
+    .catch((err) => {
+      el.querySelector('.empty').outerHTML = errorBox(err);
+    });
+  return { el };
 }
 
 export async function jfAlbumView(id) {
@@ -373,7 +505,7 @@ export async function artistView(id) {
   const albums = a.albums.filter((x) => x.recordType === 'album');
   const singles = a.albums.filter((x) => x.recordType !== 'album');
   const listId = registerList(a.top);
-  api.prefetch(a.top.slice(0, 3).map((t) => t.id));
+  api.prefetch(a.top.slice(0, 10));
 
   return {
     el: view(html`
@@ -397,6 +529,7 @@ export async function artistView(id) {
 const LIB_TABS = [
   ['songs', 'Songs'],
   ['albums', 'Alben'],
+  ['playlists', 'Playlists'],
   ['local', 'Mac Mini'],
   ['downloads', 'Downloads'],
   ['status', 'Status'],
@@ -429,6 +562,12 @@ export function libraryView() {
     try {
       if (tab === 'songs') renderSongs();
       else if (tab === 'albums') renderAlbums();
+      else if (tab === 'playlists') {
+        body.innerHTML = skeleton(3);
+        const imported = await api.imports().catch(() => []);
+        if (current !== tab) return;
+        renderPlaylists(imported);
+      }
       else if (tab === 'local') {
         body.innerHTML = skeleton(4);
         const albums = await api.libraryAlbums();
@@ -472,6 +611,19 @@ export function libraryView() {
       : emptyState('Noch keine Alben', 'Tippe auf das Herz bei einem Album, um es komplett in die Bibliothek zu laden.');
   }
 
+  function renderPlaylists(imported) {
+    const seen = new Set();
+    const all = [...imported, ...favs.playlists].filter((p) => !seen.has(p.id) && seen.add(p.id));
+    body.innerHTML = all.length
+      ? `<div class="grid" style="margin-top:12px">${all
+          .map((p) => playlistCard({ ...p, owner: [...new Set([SOURCE_NAME[p.source], p.owner].filter(Boolean))].join(' · ') }))
+          .join('')}</div>`
+      : emptyState(
+          'Noch keine Playlists',
+          'Füge in der Suche einen Spotify-Playlist-Link ein oder tippe bei einer Deezer- oder SoundCloud-Playlist auf das Herz.',
+        );
+  }
+
   async function renderDownloads() {
     const jobs = await api.downloads();
     if (tab !== 'downloads') return;
@@ -501,11 +653,16 @@ export function libraryView() {
       <span class="detail">${esc(s.ok ? okText : s.error ?? 'nicht erreichbar')}</span></div>`;
     body.innerHTML = html`<div class="status-grid" style="margin-top:12px">
       ${row('Jellyfin', h.jellyfin, `${h.jellyfin.name ?? ''} ${h.jellyfin.version ?? ''}`.trim())}
-      ${row('Deemix', h.deemix, h.deemix.loggedIn ? 'eingeloggt' : 'erreichbar')}
+      ${row('Deemix', h.deemix, [h.deemix.loggedIn ? 'eingeloggt' : 'erreichbar', h.deemix.quality?.name].filter(Boolean).join(' · '))}
       ${row('yt-dlp (Sofort-Stream)', h.ytdlp, h.ytdlp.version ?? '')}
+      ${row('ffmpeg (SoundCloud)', h.ffmpeg ?? { ok: false }, h.ffmpeg?.version ?? '')}
+      ${row('SoundCloud', h.soundcloud ?? { ok: false }, 'erreichbar')}
+      ${row('Spotify-Import', h.spotify ?? { ok: false }, h.spotify?.mode ?? '')}
       ${row('Auto-Download beim Hören', { ok: h.autoDownloadOnPlay, error: 'aus' }, 'an')}
       ${row('Service Worker', { ok: Boolean(navigator.serviceWorker?.controller), error: isSecureContext ? 'lädt…' : 'braucht HTTPS' }, 'aktiv')}
     </div>
+    ${h.deemix.quality?.reduced ? html`<p class="footnote">Dein Deezer-Konto darf kein ${h.deemix.quality.bitrate < 3 ? 'MP3 320 oder FLAC' : 'FLAC'} laden – Downloads kommen deshalb als ${esc(h.deemix.quality.name)}.</p>` : ''}
+    ${h.ytdlp.lastError ? html`<p class="footnote">Letzter yt-dlp-Fehler (${esc(new Date(h.ytdlp.lastError.at).toLocaleTimeString('de-DE'))}, ${esc(h.ytdlp.lastError.track)}):<br>${esc(h.ytdlp.lastError.message)}</p>` : ''}
     <p class="footnote">Ohne yt-dlp spielt die Sofort-Wiedergabe nur 30-Sekunden-Vorschauen, bis der Song in Jellyfin liegt.</p>`;
   }
 
@@ -532,6 +689,9 @@ export function libraryView() {
   const onFavs = () => {
     if (tab === 'songs') renderSongs();
     if (tab === 'albums') renderAlbums();
+    if (tab === 'playlists') {
+      api.imports().catch(() => []).then((list) => tab === 'playlists' && renderPlaylists(list));
+    }
   };
   document.addEventListener('favorites', onFavs);
 

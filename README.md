@@ -16,11 +16,33 @@ Tippst du auf einen Song, entscheidet das Backend in dieser Reihenfolge:
 
 1. Song liegt schon in Jellyfin → Stream direkt vom Mac Mini (FLAC, volle Qualität). Badge im Player: „Bibliothek".
 2. Sonst kompletter Song über yt-dlp (YouTube Music, offizielle Audio-Version, per Dauer und Titel abgeglichen). Badge: „Stream". Die ersten Treffer jeder Suche, Album- und Künstlerseite werden schon beim Anzeigen vorgeladen, deshalb startet der Song nach dem Tippen ohne Wartezeit.
-3. Ist yt-dlp nicht installiert oder braucht länger als 8 s → 30-Sekunden-Vorschau von Deezer. Badge: „Vorschau · 30 s".
+3. Braucht yt-dlp länger als 8 s → zuerst die 30-Sekunden-Vorschau von Deezer (Badge: „Vorschau · 30 s"). Sobald der ganze Song bereit ist, wechselt der Player automatisch darauf und meldet „Ganzer Song geladen". Endet die Vorschau vorher, wartet er auf den ganzen Song, statt weiterzuspringen. Ohne yt-dlp bleibt es bei der Vorschau.
+
+YouTube drosselt Downloads ohne festes Ende auf etwa doppelte Abspielgeschwindigkeit. Der Server holt die Audiodatei deshalb in festen 10-MB-Stücken (wie yt-dlp selbst) und reicht sie an das iPhone weiter – damit kommt sie mit voller Bandbreite.
+
+Turbo: Beim Öffnen einer Playlist, eines Albums oder einer Künstlerseite werden die Stream-Adressen der ersten 30 Titel vorab geholt, während der Wiedergabe immer die nächsten 5. Ein angetippter Song wartet nie auf vorgeladene Songs. Gefundene YouTube-Videos merkt sich das Backend dauerhaft (`data/yt-ids.json`), beim zweiten Abspielen entfällt die Suche. Wenn der Stream hakt, zeigt Bibliothek → Status den letzten yt-dlp-Fehler.
 
 Nach 5 Sekunden Wiedergabe schickt die App lautlos `POST /api/download` ans Backend. Die 5 Sekunden sind Absicht: Wer durch Charts skippt, soll nicht 40 Songs auf die Platte laden. Das Backend prüft, ob der Song schon in Jellyfin liegt, und schickt ihn sonst an Deemix. Es fragt den Fortschritt alle 3 s ab und startet nach dem letzten fertigen Download (15 s Puffer, damit mehrere Downloads nur einen Scan auslösen) den Jellyfin-Scan. Ab dann kommt derselbe Song automatisch aus der Bibliothek.
 
-Das Herz bei einem Song oder Album macht dasselbe sofort, beim Album für das komplette Album. Favoriten liegen in `data/favorites.json` auf dem Mac Mini, nicht im Browser.
+Das Herz bei einem Song oder Album macht dasselbe sofort, beim Album für das komplette Album. Öffentliche Deezer-Playlists findest du in der Suche unter „Playlists"; der Download-Knopf auf der Playlist-Seite lädt jeden Titel einzeln, damit die Ordnerstruktur nach Künstler/Album sauber bleibt. Favoriten liegen in `data/favorites.json` auf dem Mac Mini, nicht im Browser.
+
+## SoundCloud
+
+Die Suche zeigt SoundCloud-Treffer unter „Alle" und im Reiter „SoundCloud", dazu SoundCloud-Playlists. Kein Konto nötig; Tonspur nutzt dieselbe Schnittstelle wie soundcloud.com. Abgespielt wird über yt-dlp: Der Song wird in 1–3 s komplett als MP3 auf den Mac geladen (Zwischenspeicher `data/cache/sc`, begrenzt auf `CACHE_LIMIT_MB`) und von dort gestreamt. Go+-Titel (bei SoundCloud nur 30-s-Ausschnitt) werden ausgeblendet.
+
+Gehörte oder gelikte SoundCloud-Songs landen mit Titel, Künstler und Cover als `<Künstler>/<Titel>/<Titel>.mp3` in `MUSIC_DIR` (Standard `~/jellyfin-app/media/music`), danach folgt der Jellyfin-Scan. SoundCloud liefert meist 128–160 kbps, nicht FLAC.
+
+Voraussetzung: `brew install ffmpeg`.
+
+## Spotify-Playlists übernehmen
+
+Spotify-Link einer Playlist oder eines Albums (Teilen → Link kopieren) in die Suche einfügen → „Übernehmen". Tonspur sucht jeden Titel bei Deezer (über ISRC, sonst Künstler + Titel + Dauer) und legt die Playlist unter Bibliothek → Playlists ab. Abgespielt und geladen wird dann ganz normal über Deezer/YouTube; Spotify selbst lässt sich nicht abspielen (DRM). „Neu abgleichen" holt den aktuellen Stand der Playlist.
+
+Ohne Zugangsdaten liest Tonspur die öffentliche Einbettungsseite von Spotify. Das klappt auch für Spotifys eigene Playlists (Today's Top Hits, RapCaviar …), liefert aber höchstens etwa 100 Titel. Für längere Playlists: auf developer.spotify.com eine App anlegen (Redirect-URI egal, z. B. `http://localhost`) und `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET` in die `.env` eintragen. Spotifys eigene Playlists sperrt die offizielle Schnittstelle für fremde Apps; dafür fällt Tonspur automatisch auf die Einbettungsseite zurück.
+
+## Deezer-Qualität
+
+Tonspur fordert bei Deemix zuerst `DEEMIX_BITRATE` an (Standard FLAC). Lehnt Deemix mit „CantStream" ab, weil das Konto diese Qualität nicht laden darf, geht es automatisch auf MP3 320 und dann MP3 128 herunter. Die tatsächlich genutzte Qualität steht unter Bibliothek → Status.
 
 ## Vorab: zwei Punkte, an denen es sonst hakt
 
@@ -53,7 +75,7 @@ Optional `JELLYFIN_MUSIC_LIBRARY_ID`, damit nur die Musikbibliothek gescannt wir
 ### Variante A: PM2 (empfohlen, nativ auf dem Mac)
 
 ```bash
-brew install node yt-dlp
+brew install node yt-dlp deno ffmpeg
 npm install -g pm2
 
 cd ~/tonspur
@@ -108,6 +130,9 @@ tonspur/
 │   ├── deemix.js       Deemix-API (Login per ARL, addToQueue, getQueue)
 │   ├── jellyfin.js     Jellyfin-API (Suche, Abgleich, Stream, Scan)
 │   ├── deezer.js       öffentliche Deezer-API
+│   ├── soundcloud.js   SoundCloud-Suche, -Audio, Ablage im Musikordner
+│   ├── spotify.js      Spotify-Import und Abgleich mit Deezer
+│   ├── imports.js      gespeicherte Spotify-Importe
 │   ├── favorites.js    Favoriten als JSON
 │   └── util.js
 ├── public/             PWA: index.html, manifest, Service Worker, CSS, JS, Icons
@@ -122,12 +147,15 @@ tonspur/
 |---|---|---|
 | GET | `/api/search?q=` | Deezer-Songs/Alben/Künstler + Treffer aus Jellyfin |
 | GET | `/api/charts` | Startseite |
-| GET | `/api/album/:id`, `/api/artist/:id` | Deezer-Details |
+| GET | `/api/album/:id`, `/api/artist/:id`, `/api/playlist/:id` | Deezer-Details |
 | GET | `/api/stream/dz/:id` | Audio für einen Deezer-Track (Quelle automatisch) |
 | GET | `/api/stream/jf/:id` | Audio direkt aus Jellyfin |
 | GET | `/api/source/dz/:id` | welche Quelle gerade genutzt wird |
 | POST | `/api/prefetch` `{ids}` | yt-dlp-Auflösung vorwärmen |
-| POST | `/api/download` `{type, id, reason}` | Track/Album an Deemix |
+| POST | `/api/download` `{type, id, reason, source}` | Track/Album/Playlist laden (`type: sc` für SoundCloud) |
+| GET | `/api/sc/playlist/:id`, `/api/stream/sc/:id` | SoundCloud-Playlist / -Audio |
+| POST | `/api/import` `{url}` | Spotify-Playlist/-Album übernehmen oder SoundCloud-Link auflösen |
+| GET/DELETE | `/api/imports`, `/api/imports/:id` | übernommene Spotify-Playlists |
 | GET/DELETE | `/api/downloads` | Download-Status / erledigte ausblenden |
 | GET/POST/DELETE | `/api/favorites` | Favoriten |
 | GET | `/api/library/albums`, `/api/jf/album/:id` | Jellyfin-Bibliothek |

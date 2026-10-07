@@ -5,7 +5,17 @@ import { HttpError, TtlCache } from './util.js';
 const API = (process.env.DEEZER_API_URL || 'https://api.deezer.com').replace(/\/+$/, '');
 const cache = new TtlCache(10 * 60 * 1000, 1000);
 
+// Deezer erlaubt etwa 50 Anfragen pro 5 Sekunden → Abstand von mindestens 110 ms
+let nextSlot = 0;
+function throttle() {
+  const now = Date.now();
+  const wait = Math.max(0, nextSlot - now);
+  nextSlot = Math.max(now, nextSlot) + 110;
+  return wait ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+}
+
 async function dz(path) {
+  await throttle();
   const res = await fetch(API + path, { signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new HttpError(502, `Deezer ${res.status}`);
   const json = await res.json();
@@ -63,17 +73,48 @@ export function mapArtist(a) {
   };
 }
 
+export function mapPlaylist(p) {
+  return {
+    id: String(p.id),
+    source: 'dz',
+    title: p.title,
+    owner: p.creator?.name ?? p.user?.name ?? '',
+    cover: p.picture_xl ?? p.picture_big ?? null,
+    coverSmall: p.picture_medium ?? null,
+    trackCount: p.nb_tracks ?? null,
+  };
+}
+
 export async function search(q) {
   const term = encodeURIComponent(q);
-  const [tracks, albums, artists] = await Promise.all([
+  const [tracks, albums, artists, playlists] = await Promise.all([
     cached(`/search?q=${term}&limit=30`, 5 * 60 * 1000),
     cached(`/search/album?q=${term}&limit=15`, 5 * 60 * 1000),
     cached(`/search/artist?q=${term}&limit=10`, 5 * 60 * 1000),
+    cached(`/search/playlist?q=${term}&limit=15`, 5 * 60 * 1000).catch(() => ({ data: [] })),
   ]);
   return {
     tracks: tracks.data.map((t) => mapTrack(t)),
     albums: albums.data.map(mapAlbum),
     artists: artists.data.map(mapArtist),
+    playlists: playlists.data.map(mapPlaylist),
+  };
+}
+
+export async function playlist(id) {
+  const key = encodeURIComponent(id);
+  const p = await cached(`/playlist/${key}`, 30 * 60 * 1000);
+  let tracks = p.tracks?.data ?? [];
+  if (p.nb_tracks > tracks.length) {
+    const all = await cached(`/playlist/${key}/tracks?limit=1000`, 30 * 60 * 1000);
+    tracks = all.data;
+  }
+  return {
+    ...mapPlaylist(p),
+    description: p.description ?? '',
+    duration: p.duration ?? null,
+    // Gesperrte/entfernte Titel ohne Vorschau und ohne Dauer überspringen
+    tracks: tracks.filter((t) => t.readable !== false).map((t) => mapTrack(t)),
   };
 }
 
@@ -83,7 +124,18 @@ export async function chart() {
     tracks: c.tracks.data.map((t) => mapTrack(t)),
     albums: c.albums.data.map(mapAlbum),
     artists: c.artists.data.map(mapArtist),
+    playlists: (c.playlists?.data ?? []).map(mapPlaylist),
   };
+}
+
+export async function searchTracks(q, limit = 10) {
+  const r = await cached(`/search?q=${encodeURIComponent(q)}&limit=${limit}`, 30 * 60 * 1000);
+  return r.data.map((t) => mapTrack(t));
+}
+
+export async function byIsrc(isrc) {
+  const t = await cached(`/track/isrc:${encodeURIComponent(isrc)}`, 24 * 60 * 60 * 1000);
+  return t?.id ? mapTrack(t) : null;
 }
 
 export async function track(id) {

@@ -95,8 +95,9 @@ class Player extends EventTarget {
   load(autoplay) {
     const t = this.current;
     if (!t) return;
+    this.stopUpgrade();
     this.usingPreview = false;
-    this.source = t.source === 'jf' ? 'jellyfin' : null;
+    this.source = t.source === 'jf' ? 'jellyfin' : t.source === 'sc' ? 'soundcloud' : null;
     this.audio.src = streamUrl(t);
     if (autoplay) this.audio.play().catch((err) => this.emitError(err));
     this.updateMediaSession();
@@ -110,12 +111,14 @@ class Player extends EventTarget {
           if (this.current !== t) return;
           this.source = this.usingPreview ? 'preview' : r.type;
           this.emit('source');
+          if (this.source === 'preview') this.watchUpgrade(t);
         })
         .catch(() => {});
     } else {
       this.emit('source');
     }
-    api.prefetch(this.upcoming.slice(0, 2).filter((x) => x.source === 'dz').map((x) => x.id));
+    // Turbo: die nächsten Titel schon vorbereiten, damit sie ohne Wartezeit starten
+    api.prefetch(this.upcoming.slice(0, 5), { files: 2 });
   }
 
   emitError(err) {
@@ -182,10 +185,11 @@ class Player extends EventTarget {
   onTime() {
     const a = this.audio;
     const t = this.current;
-    if (t?.source === 'dz' && !this.usingPreview && a.currentTime >= DOWNLOAD_AFTER_SECONDS && !this.downloaded.has(t.id)) {
-      this.downloaded.add(t.id);
+    const key = t ? `${t.source}:${t.id}` : '';
+    if ((t?.source === 'dz' || t?.source === 'sc') && !this.usingPreview && a.currentTime >= DOWNLOAD_AFTER_SECONDS && !this.downloaded.has(key)) {
+      this.downloaded.add(key);
       // Lautloser Hintergrund-Download in die Jellyfin-Bibliothek
-      api.download('track', t.id, 'play').catch(() => {});
+      api.download(t.source === 'sc' ? 'sc' : 'track', t.id, 'play').catch(() => {});
     }
     const now = Date.now();
     if (now - this.lastPositionUpdate > 1000) {
@@ -197,7 +201,59 @@ class Player extends EventTarget {
   }
 
   onEnded() {
+    // Vorschau zu Ende, ganzer Song kommt gleich → warten statt weiterspringen
+    if (this.source === 'preview' && this.upgradeTimer) {
+      this.waitingForFull = true;
+      this.emit('state');
+      return;
+    }
     this.next(true);
+  }
+
+  // --- Vorschau → ganzer Song ---
+  // Braucht yt-dlp länger, startet erst die 30-s-Vorschau. Sobald der ganze Song
+  // bereit ist, wechselt der Player automatisch darauf (von vorn).
+
+  watchUpgrade(t) {
+    this.stopUpgrade();
+    const started = Date.now();
+    const tick = async () => {
+      if (this.current !== t) return;
+      try {
+        const r = await api.source(t.id, { wait: false });
+        if (this.current !== t) return;
+        if (r.type === 'youtube' || r.type === 'jellyfin') {
+          this.upgrade(t, r.type);
+          return;
+        }
+      } catch {}
+      if (this.current !== t) return;
+      if (Date.now() - started < 90000) {
+        this.upgradeTimer = setTimeout(tick, 2000);
+      } else {
+        const waiting = this.waitingForFull;
+        this.stopUpgrade();
+        if (waiting) this.next(true);
+      }
+    };
+    this.upgradeTimer = setTimeout(tick, 1500);
+  }
+
+  stopUpgrade() {
+    clearTimeout(this.upgradeTimer);
+    this.upgradeTimer = null;
+    this.waitingForFull = false;
+  }
+
+  upgrade(t, type) {
+    const resume = !this.audio.paused || this.waitingForFull;
+    this.stopUpgrade();
+    this.usingPreview = false;
+    this.source = type;
+    this.audio.src = `${streamUrl(t)}?full=${Date.now()}`;
+    if (resume) this.audio.play().catch((err) => this.emitError(err));
+    this.emit('source');
+    this.emit('upgraded');
   }
 
   onError() {
@@ -210,6 +266,7 @@ class Player extends EventTarget {
       this.audio.src = t.preview;
       this.audio.play().catch(() => {});
       this.emit('source');
+      this.watchUpgrade(t);
       return;
     }
     this.emitError(new Error('Titel nicht abspielbar'));

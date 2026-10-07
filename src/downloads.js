@@ -4,6 +4,7 @@ import { config } from './config.js';
 import * as deemix from './deemix.js';
 import * as deezer from './deezer.js';
 import * as jellyfin from './jellyfin.js';
+import * as soundcloud from './soundcloud.js';
 import { log, readJson, writeJson } from './util.js';
 
 const FILE = path.join(config.dataDir, 'downloads.json');
@@ -21,12 +22,16 @@ export async function init() {
   const saved = await readJson(FILE, []);
   for (const job of saved) {
     // Nach einem Neustart weiter beobachten, was noch offen war
+    if (job.engine === 'sc' && ['queued', 'downloading'].includes(job.status)) {
+      Object.assign(job, { status: 'failed', error: 'durch Neustart unterbrochen' });
+    }
     jobs.set(job.key, job);
   }
   if (active().length) startPolling();
 }
 
-const active = () => [...jobs.values()].filter((j) => j.status === 'queued' || j.status === 'downloading');
+const active = () =>
+  [...jobs.values()].filter((j) => j.engine !== 'sc' && (j.status === 'queued' || j.status === 'downloading'));
 
 function persist() {
   clearTimeout(saveTimer);
@@ -52,12 +57,13 @@ export function list() {
 const inflight = new Map();
 
 export function enqueue({ type, id, reason = 'manual', force = false }) {
-  if (!['track', 'album'].includes(type)) throw new Error('type muss track oder album sein');
+  if (!['track', 'album', 'sc'].includes(type)) throw new Error('type muss track, album oder sc sein');
   const key = `${type}:${id}`;
   const existing = jobs.get(key);
   if (existing && !force && existing.status !== 'failed') return Promise.resolve(existing);
   if (inflight.has(key)) return inflight.get(key);
-  const p = createJob(key, type, id, reason, force).finally(() => inflight.delete(key));
+  const create = type === 'sc' ? createScJob : createJob;
+  const p = create(key, type, id, reason, force).finally(() => inflight.delete(key));
   inflight.set(key, p);
   return p;
 }
@@ -100,6 +106,47 @@ async function createJob(key, type, id, reason, force) {
     log('downloads', `Fehler bei ${key}: ${err.message}`);
   }
   return job;
+}
+
+/** SoundCloud: läuft ohne Deemix – yt-dlp lädt, ffmpeg taggt, Datei landet im Musikordner. */
+async function createScJob(key, type, id, reason, force) {
+  const meta = await soundcloud.track(id);
+  const job = {
+    key,
+    type,
+    engine: 'sc',
+    id: String(id),
+    title: meta.title,
+    artist: meta.artist,
+    cover: meta.coverSmall ?? meta.cover,
+    reason,
+    status: 'queued',
+    progress: 0,
+    uuids: [],
+    error: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  jobs.set(key, job);
+  persist();
+  if (!force && soundcloud.isInLibrary(id)) {
+    update(job, { status: 'skipped', progress: 100, error: 'schon in der Bibliothek' });
+    return job;
+  }
+  update(job, { status: 'downloading', progress: 30 });
+  soundcloud
+    .saveToLibrary(id)
+    .then(() => finish(job, 'done'))
+    .catch((err) => finish(job, 'failed', err.message));
+  return job;
+}
+
+/** Viele Titel nacheinander einreihen, ohne Deemix mit parallelen Anfragen zu fluten. */
+export async function enqueueMany(ids, reason, type = 'track') {
+  log('downloads', `${reason}: ${ids.length} Titel`);
+  for (const id of ids.slice(0, 500)) {
+    await enqueue({ type, id: String(id), reason }).catch((err) => log('downloads', `${id}: ${err.message}`));
+  }
 }
 
 function startPolling() {

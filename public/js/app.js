@@ -7,6 +7,8 @@ import {
   items,
   jfAlbumView,
   libraryView,
+  playlistView,
+  importView,
   lists,
   loadFavorites,
   markPlaying,
@@ -38,6 +40,10 @@ const routes = [
   [/^\/?$/, 'search', () => searchView()],
   [/^\/album\/(\w+)$/, 'search', (m) => albumView(m[1])],
   [/^\/artist\/(\w+)$/, 'search', (m) => artistView(m[1])],
+  [/^\/playlist\/(\w+)$/, 'search', (m) => playlistView(m[1], 'dz')],
+  [/^\/sc-playlist\/(\w+)$/, 'search', (m) => playlistView(m[1], 'sc')],
+  [/^\/imported\/([\w-]+)$/, 'library', (m) => playlistView(m[1], 'sp')],
+  [/^\/import\?u=(.+)$/, 'search', (m) => importView(decodeURIComponent(m[1]))],
   [/^\/library$/, 'library', () => libraryView()],
   [/^\/jf-album\/(\w+)$/, 'library', (m) => jfAlbumView(m[1])],
 ];
@@ -161,6 +167,27 @@ document.addEventListener('click', (e) => {
       .download('album', dl.dataset.downloadAlbum, 'manual')
       .then(() => toast('Album wird in die Bibliothek geladen'))
       .catch((err) => toast(`Fehler: ${err.message}`));
+    return;
+  }
+
+  const dlp = t.closest('[data-download-playlist]');
+  if (dlp) {
+    const n = Number(dlp.dataset.count) || 0;
+    if (n > 30 && !confirm(`Alle ${n} Titel in die Bibliothek laden?`)) return;
+    api
+      .download('playlist', dlp.dataset.downloadPlaylist, 'manual', false, dlp.dataset.source)
+      .then(() => toast(`${n} Titel werden in die Bibliothek geladen`))
+      .catch((err) => toast(`Fehler: ${err.message}`));
+    return;
+  }
+
+  const rmImport = t.closest('[data-remove-import]');
+  if (rmImport) {
+    if (!confirm('Importierte Playlist aus der Bibliothek entfernen?')) return;
+    api.removeImport(rmImport.dataset.removeImport).then(() => {
+      toast('Playlist entfernt');
+      location.replace('#/library');
+    });
     return;
   }
 
@@ -339,7 +366,8 @@ function renderTime() {
 
 function renderSource() {
   const el = $('.now-source');
-  const label = { jellyfin: 'Bibliothek', youtube: 'Stream', preview: 'Vorschau · 30 s', none: 'Nicht verfügbar' }[player.source] ?? '';
+  const label =
+    { jellyfin: 'Bibliothek', youtube: 'Stream', soundcloud: 'SoundCloud', preview: 'Vorschau · 30 s', none: 'Nicht verfügbar' }[player.source] ?? '';
   el.textContent = label;
   el.classList.toggle('preview', player.source === 'preview');
 }
@@ -355,6 +383,7 @@ player.addEventListener('track', renderTrack);
 player.addEventListener('state', renderState);
 player.addEventListener('time', renderTime);
 player.addEventListener('source', renderSource);
+player.addEventListener('upgraded', () => toast('Ganzer Song geladen'));
 player.addEventListener('queue', renderModes);
 player.addEventListener('error', () => {
   const msg = player.lastError?.name === 'NotAllowedError' ? 'Zum Abspielen einmal auf Play tippen' : player.lastError?.message ?? 'Wiedergabefehler';
