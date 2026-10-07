@@ -102,6 +102,14 @@ async function createJob(key, type, id, reason, force) {
   return job;
 }
 
+/** Viele Titel nacheinander einreihen, ohne Deemix mit parallelen Anfragen zu fluten. */
+export async function enqueueMany(ids, reason) {
+  log('downloads', `${reason}: ${ids.length} Titel`);
+  for (const id of ids.slice(0, 500)) {
+    await enqueue({ type: 'track', id: String(id), reason }).catch((err) => log('downloads', `${id}: ${err.message}`));
+  }
+}
+
 function startPolling() {
   if (pollTimer) return;
   pollTimer = setInterval(poll, POLL_MS);

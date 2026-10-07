@@ -16,11 +16,13 @@ Tippst du auf einen Song, entscheidet das Backend in dieser Reihenfolge:
 
 1. Song liegt schon in Jellyfin → Stream direkt vom Mac Mini (FLAC, volle Qualität). Badge im Player: „Bibliothek".
 2. Sonst kompletter Song über yt-dlp (YouTube Music, offizielle Audio-Version, per Dauer und Titel abgeglichen). Badge: „Stream". Die ersten Treffer jeder Suche, Album- und Künstlerseite werden schon beim Anzeigen vorgeladen, deshalb startet der Song nach dem Tippen ohne Wartezeit.
-3. Ist yt-dlp nicht installiert oder braucht länger als 8 s → 30-Sekunden-Vorschau von Deezer. Badge: „Vorschau · 30 s".
+3. Braucht yt-dlp länger als 8 s → zuerst die 30-Sekunden-Vorschau von Deezer (Badge: „Vorschau · 30 s"). Sobald der ganze Song bereit ist, wechselt der Player automatisch darauf und meldet „Ganzer Song geladen". Endet die Vorschau vorher, wartet er auf den ganzen Song, statt weiterzuspringen. Ohne yt-dlp bleibt es bei der Vorschau.
+
+Ein angetippter Song wartet nie auf vorgeladene Songs. Gefundene YouTube-Videos merkt sich das Backend dauerhaft (`data/yt-ids.json`), beim zweiten Abspielen entfällt die Suche. Wenn der Stream hakt, zeigt Bibliothek → Status den letzten yt-dlp-Fehler.
 
 Nach 5 Sekunden Wiedergabe schickt die App lautlos `POST /api/download` ans Backend. Die 5 Sekunden sind Absicht: Wer durch Charts skippt, soll nicht 40 Songs auf die Platte laden. Das Backend prüft, ob der Song schon in Jellyfin liegt, und schickt ihn sonst an Deemix. Es fragt den Fortschritt alle 3 s ab und startet nach dem letzten fertigen Download (15 s Puffer, damit mehrere Downloads nur einen Scan auslösen) den Jellyfin-Scan. Ab dann kommt derselbe Song automatisch aus der Bibliothek.
 
-Das Herz bei einem Song oder Album macht dasselbe sofort, beim Album für das komplette Album. Favoriten liegen in `data/favorites.json` auf dem Mac Mini, nicht im Browser.
+Das Herz bei einem Song oder Album macht dasselbe sofort, beim Album für das komplette Album. Öffentliche Deezer-Playlists findest du in der Suche unter „Playlists"; der Download-Knopf auf der Playlist-Seite lädt jeden Titel einzeln, damit die Ordnerstruktur nach Künstler/Album sauber bleibt. Favoriten liegen in `data/favorites.json` auf dem Mac Mini, nicht im Browser.
 
 ## Vorab: zwei Punkte, an denen es sonst hakt
 
@@ -122,12 +124,12 @@ tonspur/
 |---|---|---|
 | GET | `/api/search?q=` | Deezer-Songs/Alben/Künstler + Treffer aus Jellyfin |
 | GET | `/api/charts` | Startseite |
-| GET | `/api/album/:id`, `/api/artist/:id` | Deezer-Details |
+| GET | `/api/album/:id`, `/api/artist/:id`, `/api/playlist/:id` | Deezer-Details |
 | GET | `/api/stream/dz/:id` | Audio für einen Deezer-Track (Quelle automatisch) |
 | GET | `/api/stream/jf/:id` | Audio direkt aus Jellyfin |
 | GET | `/api/source/dz/:id` | welche Quelle gerade genutzt wird |
 | POST | `/api/prefetch` `{ids}` | yt-dlp-Auflösung vorwärmen |
-| POST | `/api/download` `{type, id, reason}` | Track/Album an Deemix |
+| POST | `/api/download` `{type, id, reason}` | Track/Album/Playlist an Deemix |
 | GET/DELETE | `/api/downloads` | Download-Status / erledigte ausblenden |
 | GET/POST/DELETE | `/api/favorites` | Favoriten |
 | GET | `/api/library/albums`, `/api/jf/album/:id` | Jellyfin-Bibliothek |

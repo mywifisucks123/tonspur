@@ -93,31 +93,51 @@ async function candidates(query) {
   return [];
 }
 
-/** Sucht das beste Video für einen Deezer-Track und liefert die direkte Audio-URL. */
-export async function resolve(track) {
-  const query = `${track.artist} - ${track.title}`;
-  const list = await candidates(query);
-  if (!list.length) throw new Error('kein YouTube-Treffer');
-  const best = list.map((e) => ({ e, s: score(track, e) })).sort((a, b) => b.s - a.s)[0].e;
+const FORMAT = 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio';
+const GOOD_ENOUGH = 60;
 
-  const out = await run([
-    '-f',
-    'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio',
-    '--no-playlist',
-    '--no-warnings',
-    '-j',
-    `https://www.youtube.com/watch?v=${best.id}`,
-  ]);
-  const info = JSON.parse(out);
-  if (!info.url) throw new Error('keine Audio-URL');
-
+function toStream(info) {
+  if (!info?.url) throw new Error('keine Audio-URL');
   const expire = Number(new URL(info.url).searchParams.get('expire')) * 1000;
   const mime = info.ext === 'm4a' || info.ext === 'mp4' ? 'audio/mp4' : info.ext === 'webm' ? 'audio/webm' : null;
   return {
     url: info.url,
     headers: info.http_headers ?? {},
     mime,
-    videoId: best.id,
+    videoId: info.id,
     expires: expire || Date.now() + 3 * 60 * 60 * 1000,
   };
+}
+
+/** Audio-URL für ein bekanntes Video – ein yt-dlp-Aufruf. */
+export async function extract(videoId) {
+  const out = await run(['-f', FORMAT, '--no-playlist', '--no-warnings', '-j', `https://www.youtube.com/watch?v=${videoId}`]);
+  return toStream(JSON.parse(out));
+}
+
+/**
+ * Sucht das passende Video und liefert die direkte Audio-URL.
+ * Schneller Weg: ersten Song-Treffer von YouTube Music in EINEM Aufruf suchen und auflösen.
+ * Passt der nicht (Dauer/Titel), wird breiter gesucht und der beste Treffer aufgelöst.
+ */
+export async function resolve(track) {
+  const query = `${track.artist} - ${track.title}`;
+
+  if (config.yt.search === 'music') {
+    try {
+      const out = await run([
+        '-f', FORMAT, '--no-warnings', '-j', '--playlist-items', '1',
+        `https://music.youtube.com/search?q=${encodeURIComponent(query)}#songs`,
+      ]);
+      const info = JSON.parse(out.split('\n').find(Boolean));
+      if (score(track, info) >= GOOD_ENOUGH) return toStream(info);
+    } catch (err) {
+      log('yt-dlp', `Schnellsuche fehlgeschlagen: ${err.message}`);
+    }
+  }
+
+  const list = await candidates(query);
+  if (!list.length) throw new Error('kein YouTube-Treffer');
+  const best = list.map((e) => ({ e, s: score(track, e) })).sort((a, b) => b.s - a.s)[0].e;
+  return extract(best.id);
 }

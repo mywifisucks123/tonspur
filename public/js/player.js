@@ -95,6 +95,7 @@ class Player extends EventTarget {
   load(autoplay) {
     const t = this.current;
     if (!t) return;
+    this.stopUpgrade();
     this.usingPreview = false;
     this.source = t.source === 'jf' ? 'jellyfin' : null;
     this.audio.src = streamUrl(t);
@@ -110,6 +111,7 @@ class Player extends EventTarget {
           if (this.current !== t) return;
           this.source = this.usingPreview ? 'preview' : r.type;
           this.emit('source');
+          if (this.source === 'preview') this.watchUpgrade(t);
         })
         .catch(() => {});
     } else {
@@ -197,7 +199,59 @@ class Player extends EventTarget {
   }
 
   onEnded() {
+    // Vorschau zu Ende, ganzer Song kommt gleich → warten statt weiterspringen
+    if (this.source === 'preview' && this.upgradeTimer) {
+      this.waitingForFull = true;
+      this.emit('state');
+      return;
+    }
     this.next(true);
+  }
+
+  // --- Vorschau → ganzer Song ---
+  // Braucht yt-dlp länger, startet erst die 30-s-Vorschau. Sobald der ganze Song
+  // bereit ist, wechselt der Player automatisch darauf (von vorn).
+
+  watchUpgrade(t) {
+    this.stopUpgrade();
+    const started = Date.now();
+    const tick = async () => {
+      if (this.current !== t) return;
+      try {
+        const r = await api.source(t.id, { wait: false });
+        if (this.current !== t) return;
+        if (r.type === 'youtube' || r.type === 'jellyfin') {
+          this.upgrade(t, r.type);
+          return;
+        }
+      } catch {}
+      if (this.current !== t) return;
+      if (Date.now() - started < 90000) {
+        this.upgradeTimer = setTimeout(tick, 2000);
+      } else {
+        const waiting = this.waitingForFull;
+        this.stopUpgrade();
+        if (waiting) this.next(true);
+      }
+    };
+    this.upgradeTimer = setTimeout(tick, 1500);
+  }
+
+  stopUpgrade() {
+    clearTimeout(this.upgradeTimer);
+    this.upgradeTimer = null;
+    this.waitingForFull = false;
+  }
+
+  upgrade(t, type) {
+    const resume = !this.audio.paused || this.waitingForFull;
+    this.stopUpgrade();
+    this.usingPreview = false;
+    this.source = type;
+    this.audio.src = `${streamUrl(t)}?full=${Date.now()}`;
+    if (resume) this.audio.play().catch((err) => this.emitError(err));
+    this.emit('source');
+    this.emit('upgraded');
   }
 
   onError() {
@@ -210,6 +264,7 @@ class Player extends EventTarget {
       this.audio.src = t.preview;
       this.audio.play().catch(() => {});
       this.emit('source');
+      this.watchUpgrade(t);
       return;
     }
     this.emitError(new Error('Titel nicht abspielbar'));

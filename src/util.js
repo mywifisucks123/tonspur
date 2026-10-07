@@ -53,7 +53,7 @@ export class TtlCache {
   }
 }
 
-/** Begrenzt parallele Aufgaben; dringende Aufgaben werden vorgezogen. */
+/** Begrenzt parallele Hintergrund-Aufgaben; dringende laufen sofort. */
 export class Limiter {
   constructor(concurrency) {
     this.concurrency = concurrency;
@@ -61,7 +61,7 @@ export class Limiter {
     this.queue = [];
   }
 
-  run(fn, { urgent = false } = {}) {
+  run(fn, { urgent = false, key } = {}) {
     return new Promise((resolve, reject) => {
       const task = () => {
         this.active++;
@@ -70,13 +70,20 @@ export class Limiter {
           .then(resolve, reject)
           .finally(() => {
             this.active--;
-            this.queue.shift()?.();
+            if (this.active < this.concurrency) this.queue.shift()?.();
           });
       };
-      if (this.active < this.concurrency) task();
-      else if (urgent) this.queue.unshift(task);
+      task.key = key;
+      // Dringendes (angetippter Song) wartet nie auf Vorab-Aufträge
+      if (urgent || this.active < this.concurrency) task();
       else this.queue.push(task);
     });
+  }
+
+  /** Einen wartenden Auftrag sofort starten (Song wurde inzwischen angetippt). */
+  promote(key) {
+    const idx = this.queue.findIndex((t) => t.key === key);
+    if (idx >= 0) this.queue.splice(idx, 1)[0]();
   }
 }
 

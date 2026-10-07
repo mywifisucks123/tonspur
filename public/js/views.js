@@ -117,6 +117,12 @@ function albumCard(a) {
     <div class="card-title">${esc(a.title)}</div><div class="card-sub">${esc(sub)}</div></a>`;
 }
 
+function playlistCard(p) {
+  const sub = [p.owner, p.trackCount ? `${p.trackCount} Titel` : null].filter(Boolean).join(' · ');
+  return html`<a class="card" href="#/playlist/${p.id}">${img(p.coverSmall ?? p.cover, 'card-art')}
+    <div class="card-title">${esc(p.title)}</div><div class="card-sub">${esc(sub)}</div></a>`;
+}
+
 function artistCard(a) {
   return html`<a class="card round" href="#/artist/${a.id}">${img(a.pictureSmall ?? a.picture, 'card-art')}
     <div class="card-title">${esc(a.name)}</div></a>`;
@@ -185,6 +191,7 @@ export function searchView() {
         <button data-filter="tracks">Songs</button>
         <button data-filter="albums">Alben</button>
         <button data-filter="artists">Künstler</button>
+        <button data-filter="playlists">Playlists</button>
       </div>
     </header>
     <div class="search-body"></div>
@@ -278,7 +285,8 @@ async function renderHome(body) {
       installHint() +
       section('Top Songs', `<div class="list">${trackRows(c.tracks.slice(0, 12))}</div>`) +
       section('Top Alben', `<div class="shelf">${c.albums.map(albumCard).join('')}</div>`) +
-      section('Künstler', `<div class="shelf artists">${c.artists.map(artistCard).join('')}</div>`);
+      section('Künstler', `<div class="shelf artists">${c.artists.map(artistCard).join('')}</div>`) +
+      (c.playlists?.length ? section('Beliebte Playlists', `<div class="shelf">${c.playlists.map(playlistCard).join('')}</div>`) : '');
     markPlaying();
     api.prefetch(c.tracks.slice(0, 4).map((t) => t.id));
   } catch (err) {
@@ -290,7 +298,8 @@ function renderResults(body) {
   const r = searchState.results;
   if (!r) return;
   const { filter } = searchState;
-  const empty = !r.tracks.length && !r.albums.length && !r.artists.length && !r.local.length;
+  const playlists = r.playlists ?? [];
+  const empty = !r.tracks.length && !r.albums.length && !r.artists.length && !playlists.length && !r.local.length;
   if (empty) {
     body.innerHTML = html`<div class="empty">${icons.search}<h3>Keine Treffer</h3><p>„${esc(searchState.q)}“ gibt es weder bei Deezer noch auf dem Mac Mini.</p></div>`;
     return;
@@ -307,6 +316,7 @@ function renderResults(body) {
     }
     if (r.artists.length) out += section('Künstler', `<div class="shelf artists">${r.artists.map(artistCard).join('')}</div>`);
     if (r.albums.length) out += section('Alben', `<div class="shelf">${r.albums.map(albumCard).join('')}</div>`);
+    if (playlists.length) out += section('Playlists', `<div class="shelf">${playlists.map(playlistCard).join('')}</div>`);
     if (r.local.length) out += section('Auf deinem Mac Mini', `<div class="list">${trackRows(r.local)}</div>`);
   } else if (filter === 'tracks') {
     out = `<div class="list" style="margin-top:8px">${trackRows(r.tracks)}</div>`;
@@ -314,6 +324,10 @@ function renderResults(body) {
     out = `<div class="grid" style="margin-top:12px">${r.albums.map(albumCard).join('')}</div>`;
   } else if (filter === 'artists') {
     out = `<div class="grid" style="margin-top:12px">${r.artists.map(artistCard).join('')}</div>`;
+  } else if (filter === 'playlists') {
+    out = playlists.length
+      ? `<div class="grid" style="margin-top:12px">${playlists.map(playlistCard).join('')}</div>`
+      : html`<div class="empty">${icons.search}<h3>Keine Playlists</h3><p>Zu „${esc(searchState.q)}“ gibt es keine öffentlichen Playlists.</p></div>`;
   }
   body.innerHTML = out;
   markPlaying();
@@ -357,6 +371,32 @@ export async function albumView(id) {
   const a = await api.album(id);
   api.prefetch(a.tracks.slice(0, 3).map((t) => t.id));
   return { el: view(albumMarkup(a, { downloadable: true })) };
+}
+
+export async function playlistView(id) {
+  const p = await api.playlist(id);
+  const listId = registerList(p.tracks);
+  const total = p.tracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+  const meta = ['Playlist', `${p.tracks.length} Titel`, total ? fmtDuration(total) : null].filter(Boolean).join(' · ');
+  api.prefetch(p.tracks.slice(0, 3).map((t) => t.id));
+  return {
+    el: view(html`
+      ${backButton()}
+      <div class="hero">
+        <div class="hero-glow">${img(p.coverSmall ?? p.cover, '')}</div>
+        ${img(p.cover, 'hero-art', p.title)}
+        <h1>${esc(p.title)}</h1>
+        ${p.owner ? `<div class="hero-sub">${esc(p.owner)}</div>` : ''}
+        <div class="hero-meta">${esc(meta)}</div>
+      </div>
+      <div class="actions">
+        <button class="btn" data-play-list="${listId}">${icons.play} Abspielen</button>
+        <button class="btn" data-shuffle-list="${listId}">${icons.shuffle} Zufall</button>
+        <button class="btn fav" data-download-playlist="${p.id}" data-count="${p.tracks.length}" aria-label="Playlist laden">${icons.download}</button>
+      </div>
+      <div class="list">${trackRows(p.tracks)}</div>
+    `),
+  };
 }
 
 export async function jfAlbumView(id) {
@@ -506,6 +546,7 @@ export function libraryView() {
       ${row('Auto-Download beim Hören', { ok: h.autoDownloadOnPlay, error: 'aus' }, 'an')}
       ${row('Service Worker', { ok: Boolean(navigator.serviceWorker?.controller), error: isSecureContext ? 'lädt…' : 'braucht HTTPS' }, 'aktiv')}
     </div>
+    ${h.ytdlp.lastError ? html`<p class="footnote">Letzter yt-dlp-Fehler (${esc(new Date(h.ytdlp.lastError.at).toLocaleTimeString('de-DE'))}, ${esc(h.ytdlp.lastError.track)}):<br>${esc(h.ytdlp.lastError.message)}</p>` : ''}
     <p class="footnote">Ohne yt-dlp spielt die Sofort-Wiedergabe nur 30-Sekunden-Vorschauen, bis der Song in Jellyfin liegt.</p>`;
   }
 

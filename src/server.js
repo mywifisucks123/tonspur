@@ -38,6 +38,7 @@ api.get('/search', async (req, res) => {
 api.get('/charts', async (_req, res) => res.json(await deezer.chart()));
 api.get('/album/:id', async (req, res) => res.json(await deezer.album(req.params.id)));
 api.get('/artist/:id', async (req, res) => res.json(await deezer.artist(req.params.id)));
+api.get('/playlist/:id', async (req, res) => res.json(await deezer.playlist(req.params.id)));
 
 // --- Streaming ---------------------------------------------------------------
 
@@ -102,6 +103,12 @@ api.post('/download', async (req, res) => {
   const { type = 'track', id, reason = 'manual', force = false } = req.body ?? {};
   if (!id) throw new HttpError(400, 'id fehlt');
   if (reason === 'play' && !config.autoDownloadOnPlay) return res.status(204).end();
+  if (type === 'playlist') {
+    // Playlist = jeder Titel einzeln, damit Künstler-/Album-Ordner sauber bleiben
+    const p = await deezer.playlist(String(id));
+    downloads.enqueueMany(p.tracks.map((t) => t.id), `Playlist ${p.title}`);
+    return res.status(202).json({ ok: true, count: p.tracks.length });
+  }
   const job = await downloads.enqueue({ type, id: String(id), reason, force: Boolean(force) });
   res.status(202).json(job);
 });
@@ -145,7 +152,9 @@ api.get('/health', async (_req, res) => {
   res.json({
     jellyfin: jf,
     deemix: dm,
-    ytdlp: ytv ? { ok: true, version: ytv } : { ok: false, error: config.yt.enabled ? 'nicht installiert' : 'deaktiviert' },
+    ytdlp: ytv
+      ? { ok: true, version: ytv, lastError: resolver.lastYoutubeError() }
+      : { ok: false, error: config.yt.enabled ? 'nicht installiert' : 'deaktiviert' },
     autoDownloadOnPlay: config.autoDownloadOnPlay,
   });
 });
@@ -183,7 +192,7 @@ app.use((req, res, next) => {
   res.sendFile(path.join(config.publicDir, 'index.html'));
 });
 
-await Promise.all([favorites.init(), downloads.init()]);
+await Promise.all([favorites.init(), downloads.init(), resolver.init()]);
 
 app.listen(config.port, config.host, async () => {
   log('server', `läuft auf http://${config.host}:${config.port}`);

@@ -63,17 +63,48 @@ export function mapArtist(a) {
   };
 }
 
+export function mapPlaylist(p) {
+  return {
+    id: String(p.id),
+    source: 'dz',
+    title: p.title,
+    owner: p.creator?.name ?? p.user?.name ?? '',
+    cover: p.picture_xl ?? p.picture_big ?? null,
+    coverSmall: p.picture_medium ?? null,
+    trackCount: p.nb_tracks ?? null,
+  };
+}
+
 export async function search(q) {
   const term = encodeURIComponent(q);
-  const [tracks, albums, artists] = await Promise.all([
+  const [tracks, albums, artists, playlists] = await Promise.all([
     cached(`/search?q=${term}&limit=30`, 5 * 60 * 1000),
     cached(`/search/album?q=${term}&limit=15`, 5 * 60 * 1000),
     cached(`/search/artist?q=${term}&limit=10`, 5 * 60 * 1000),
+    cached(`/search/playlist?q=${term}&limit=15`, 5 * 60 * 1000).catch(() => ({ data: [] })),
   ]);
   return {
     tracks: tracks.data.map((t) => mapTrack(t)),
     albums: albums.data.map(mapAlbum),
     artists: artists.data.map(mapArtist),
+    playlists: playlists.data.map(mapPlaylist),
+  };
+}
+
+export async function playlist(id) {
+  const key = encodeURIComponent(id);
+  const p = await cached(`/playlist/${key}`, 30 * 60 * 1000);
+  let tracks = p.tracks?.data ?? [];
+  if (p.nb_tracks > tracks.length) {
+    const all = await cached(`/playlist/${key}/tracks?limit=1000`, 30 * 60 * 1000);
+    tracks = all.data;
+  }
+  return {
+    ...mapPlaylist(p),
+    description: p.description ?? '',
+    duration: p.duration ?? null,
+    // Gesperrte/entfernte Titel ohne Vorschau und ohne Dauer überspringen
+    tracks: tracks.filter((t) => t.readable !== false).map((t) => mapTrack(t)),
   };
 }
 
@@ -83,6 +114,7 @@ export async function chart() {
     tracks: c.tracks.data.map((t) => mapTrack(t)),
     albums: c.albums.data.map(mapAlbum),
     artists: c.artists.data.map(mapArtist),
+    playlists: (c.playlists?.data ?? []).map(mapPlaylist),
   };
 }
 

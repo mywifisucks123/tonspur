@@ -31,6 +31,7 @@ export const api = {
   charts: () => cached('/charts', 30 * 60 * 1000),
   album: (id) => cached(`/album/${id}`),
   artist: (id) => cached(`/artist/${id}`),
+  playlist: (id) => cached(`/playlist/${id}`, 10 * 60 * 1000),
   jfAlbum: (id) => cached(`/jf/album/${id}`, 60 * 1000),
   libraryAlbums: () => request('/library/albums'),
   favorites: () => request('/favorites'),
@@ -40,7 +41,7 @@ export const api = {
     request('/download', { method: 'POST', body: { type, id, reason, force } }),
   downloads: () => request('/downloads'),
   clearDownloads: () => request('/downloads', { method: 'DELETE' }),
-  source: (id) => request(`/source/dz/${id}`),
+  source: (id, { wait = true } = {}) => request(`/source/dz/${id}${wait ? '' : '?wait=0'}`),
   prefetch: (ids) => {
     const list = ids.filter(Boolean);
     if (!list.length) return Promise.resolve();
