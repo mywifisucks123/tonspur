@@ -5,9 +5,12 @@ import * as deemix from './deemix.js';
 import * as deezer from './deezer.js';
 import * as downloads from './downloads.js';
 import * as favorites from './favorites.js';
+import * as imports from './imports.js';
 import * as jellyfin from './jellyfin.js';
-import { proxy } from './proxy.js';
+import { proxy, proxyChunked } from './proxy.js';
 import * as resolver from './resolver.js';
+import * as soundcloud from './soundcloud.js';
+import * as spotify from './spotify.js';
 import { HttpError, log } from './util.js';
 import * as yt from './ytdlp.js';
 
@@ -22,23 +25,47 @@ const api = express.Router();
 
 api.get('/search', async (req, res) => {
   const q = String(req.query.q ?? '').trim();
-  if (!q) return res.json({ tracks: [], albums: [], artists: [], local: [] });
+  if (!q) return res.json({ tracks: [], albums: [], artists: [], playlists: [], local: [], soundcloud: null });
 
-  const [remote, local] = await Promise.all([
+  const [remote, local, sc] = await Promise.all([
     deezer.search(q),
     jellyfin.isConfigured() ? jellyfin.searchTracks(q, 25).catch(() => []) : [],
+    soundcloud.search(q).catch((err) => {
+      log('soundcloud', `Suche: ${err.message}`);
+      return { tracks: [], playlists: [], error: err.message };
+    }),
   ]);
   // Deezer-Treffer markieren, die schon auf dem Mac Mini liegen
   for (const t of remote.tracks) {
     t.local = local.some((l) => jellyfin.matches(t, l));
   }
-  res.json({ ...remote, local: local.slice(0, 8) });
+  res.json({ ...remote, local: local.slice(0, 8), soundcloud: sc });
 });
 
 api.get('/charts', async (_req, res) => res.json(await deezer.chart()));
 api.get('/album/:id', async (req, res) => res.json(await deezer.album(req.params.id)));
 api.get('/artist/:id', async (req, res) => res.json(await deezer.artist(req.params.id)));
 api.get('/playlist/:id', async (req, res) => res.json(await deezer.playlist(req.params.id)));
+api.get('/sc/playlist/:id', async (req, res) => res.json(await soundcloud.playlist(req.params.id)));
+
+// --- Links importieren (Spotify-Playlist/-Album, SoundCloud-Song/-Playlist) ----
+
+api.post('/import', async (req, res) => {
+  const url = String(req.body?.url ?? '').trim();
+  if (spotify.parseLink(url)) {
+    const p = await imports.save(await spotify.importLink(url));
+    return res.json({ kind: 'import', id: p.id, title: p.title, found: p.tracks.length, missing: p.missing.length });
+  }
+  if (/soundcloud\.com\//.test(url)) return res.json(await soundcloud.resolveUrl(url));
+  throw new HttpError(400, 'Bitte einen Spotify- oder SoundCloud-Link einfügen');
+});
+
+api.get('/imports', (_req, res) => res.json(imports.list()));
+api.get('/imports/:id', (req, res) => res.json(imports.get(req.params.id)));
+api.delete('/imports/:id', async (req, res) => {
+  await imports.remove(req.params.id);
+  res.json(imports.list());
+});
 
 // --- Streaming ---------------------------------------------------------------
 
@@ -52,10 +79,10 @@ api.get('/stream/dz/:id', async (req, res) => {
       }));
     }
     if (src.type === 'youtube') {
-      const status = await proxy(req, res, src.url, {
+      const status = await proxyChunked(req, res, src.url, {
         headers: src.headers,
         contentType: src.mime,
-        retryOn: attempt === 0 ? [403, 410] : undefined,
+        retryOn: attempt === 0 ? [403, 410] : [],
       });
       if (status === 403 || status === 410) {
         resolver.invalidateYoutube(id);
@@ -69,6 +96,11 @@ api.get('/stream/dz/:id', async (req, res) => {
   throw new HttpError(502, 'Stream nicht verfügbar');
 });
 
+api.get('/stream/sc/:id', async (req, res) => {
+  const file = await soundcloud.audioFile(req.params.id, { urgent: true });
+  res.sendFile(file, { dotfiles: 'allow', headers: { 'Cache-Control': 'no-store' } });
+});
+
 api.get('/stream/jf/:id', async (req, res) => {
   await proxy(req, res, jellyfin.streamUrl(req.params.id), { headers: jellyfin.authHeaders() });
 });
@@ -78,10 +110,15 @@ api.get('/source/dz/:id', async (req, res) => {
   res.json({ type: src.type });
 });
 
+// Vorladen: Deezer-Titel bekommen ihre YouTube-Adresse (billig), SoundCloud-Titel werden
+// komplett geladen (teurer, deshalb weniger). Alles im Hintergrund mit niedriger Priorität.
 api.post('/prefetch', (req, res) => {
-  const ids = [...new Set((req.body?.ids ?? []).map(String))].slice(0, 12);
-  for (const id of ids) resolver.prefetch(id).catch(() => {});
-  res.status(202).json({ ok: true, count: ids.length });
+  const keys = [...new Set((req.body?.keys ?? (req.body?.ids ?? []).map((id) => `dz:${id}`)).map(String))];
+  const dz = keys.filter((k) => k.startsWith('dz:')).slice(0, 40);
+  const sc = keys.filter((k) => k.startsWith('sc:')).slice(0, 4);
+  for (const k of dz) resolver.prefetch(k.slice(3)).catch(() => {});
+  for (const k of sc) soundcloud.prefetch(k.slice(3));
+  res.status(202).json({ ok: true, count: dz.length + sc.length });
 });
 
 // --- Jellyfin-Bibliothek -----------------------------------------------------
@@ -105,8 +142,10 @@ api.post('/download', async (req, res) => {
   if (reason === 'play' && !config.autoDownloadOnPlay) return res.status(204).end();
   if (type === 'playlist') {
     // Playlist = jeder Titel einzeln, damit Künstler-/Album-Ordner sauber bleiben
-    const p = await deezer.playlist(String(id));
-    downloads.enqueueMany(p.tracks.map((t) => t.id), `Playlist ${p.title}`);
+    const source = req.body?.source ?? 'dz';
+    const p =
+      source === 'sc' ? await soundcloud.playlist(String(id)) : source === 'sp' ? imports.get(String(id)) : await deezer.playlist(String(id));
+    downloads.enqueueMany(p.tracks.map((t) => t.id), `Playlist ${p.title}`, source === 'sc' ? 'sc' : 'track');
     return res.status(202).json({ ok: true, count: p.tracks.length });
   }
   const job = await downloads.enqueue({ type, id: String(id), reason, force: Boolean(force) });
@@ -125,8 +164,11 @@ api.post('/favorites', async (req, res) => {
   const { type, item } = req.body ?? {};
   if (!item?.id || !item?.source) throw new HttpError(400, 'item fehlt');
   const data = await favorites.add(type, item);
-  if (item.source === 'dz') {
+  if (item.source === 'dz' && (type === 'track' || type === 'album')) {
     downloads.enqueue({ type, id: item.id, reason: 'favorite' }).catch((err) => log('favorites', err.message));
+  }
+  if (item.source === 'sc' && type === 'track') {
+    downloads.enqueue({ type: 'sc', id: item.id, reason: 'favorite' }).catch((err) => log('favorites', err.message));
   }
   res.json(data);
 });
@@ -144,10 +186,12 @@ api.get('/health', async (_req, res) => {
       (v) => v,
       (err) => ({ ok: false, error: err.message }),
     );
-  const [jf, dm, ytv] = await Promise.all([
+  const [jf, dm, ytv, ff, sc] = await Promise.all([
     jellyfin.isConfigured() ? settle(jellyfin.ping()) : { ok: false, error: 'JELLYFIN_API_KEY fehlt' },
     settle(deemix.ping()),
     yt.version(),
+    soundcloud.ffmpegVersion(),
+    settle(soundcloud.ping()),
   ]);
   res.json({
     jellyfin: jf,
@@ -155,6 +199,9 @@ api.get('/health', async (_req, res) => {
     ytdlp: ytv
       ? { ok: true, version: ytv, lastError: resolver.lastYoutubeError() }
       : { ok: false, error: config.yt.enabled ? 'nicht installiert' : 'deaktiviert' },
+    ffmpeg: ff ? { ok: true, version: ff } : { ok: false, error: 'nicht installiert (brew install ffmpeg)' },
+    soundcloud: sc,
+    spotify: { ok: true, mode: config.spotify.clientId ? 'Web-API' : 'Einbettung (max. ~100 Titel)' },
     autoDownloadOnPlay: config.autoDownloadOnPlay,
   });
 });
@@ -192,7 +239,7 @@ app.use((req, res, next) => {
   res.sendFile(path.join(config.publicDir, 'index.html'));
 });
 
-await Promise.all([favorites.init(), downloads.init(), resolver.init()]);
+await Promise.all([favorites.init(), downloads.init(), resolver.init(), soundcloud.init(), imports.init()]);
 
 app.listen(config.port, config.host, async () => {
   log('server', `läuft auf http://${config.host}:${config.port}`);

@@ -37,16 +37,25 @@ export const api = {
   favorites: () => request('/favorites'),
   addFavorite: (type, item) => request('/favorites', { method: 'POST', body: { type, item } }),
   removeFavorite: (type, item) => request(`/favorites/${type}/${item.source}/${item.id}`, { method: 'DELETE' }),
-  download: (type, id, reason = 'manual', force = false) =>
-    request('/download', { method: 'POST', body: { type, id, reason, force } }),
+  download: (type, id, reason = 'manual', force = false, source) =>
+    request('/download', { method: 'POST', body: { type, id, reason, force, source } }),
   downloads: () => request('/downloads'),
   clearDownloads: () => request('/downloads', { method: 'DELETE' }),
   source: (id, { wait = true } = {}) => request(`/source/dz/${id}${wait ? '' : '?wait=0'}`),
-  prefetch: (ids) => {
-    const list = ids.filter(Boolean);
-    if (!list.length) return Promise.resolve();
-    return request('/prefetch', { method: 'POST', body: { ids: list } }).catch(() => {});
+  // Nimmt Track-Objekte oder Deezer-IDs; Jellyfin-Titel brauchen kein Vorladen
+  prefetch: (tracks) => {
+    const keys = tracks
+      .filter(Boolean)
+      .map((t) => (typeof t === 'object' ? (t.source === 'jf' || t.local ? null : `${t.source}:${t.id}`) : `dz:${t}`))
+      .filter(Boolean);
+    if (!keys.length) return Promise.resolve();
+    return request('/prefetch', { method: 'POST', body: { keys } }).catch(() => {});
   },
+  scPlaylist: (id) => cached(`/sc/playlist/${id}`, 10 * 60 * 1000),
+  importLink: (url) => request('/import', { method: 'POST', body: { url } }),
+  imports: () => request('/imports'),
+  imported: (id) => request(`/imports/${encodeURIComponent(id)}`),
+  removeImport: (id) => request(`/imports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   health: () => request('/health'),
 };
 

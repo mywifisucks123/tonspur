@@ -97,7 +97,7 @@ class Player extends EventTarget {
     if (!t) return;
     this.stopUpgrade();
     this.usingPreview = false;
-    this.source = t.source === 'jf' ? 'jellyfin' : null;
+    this.source = t.source === 'jf' ? 'jellyfin' : t.source === 'sc' ? 'soundcloud' : null;
     this.audio.src = streamUrl(t);
     if (autoplay) this.audio.play().catch((err) => this.emitError(err));
     this.updateMediaSession();
@@ -117,7 +117,8 @@ class Player extends EventTarget {
     } else {
       this.emit('source');
     }
-    api.prefetch(this.upcoming.slice(0, 2).filter((x) => x.source === 'dz').map((x) => x.id));
+    // Turbo: die nächsten Titel schon vorbereiten, damit sie ohne Wartezeit starten
+    api.prefetch(this.upcoming.slice(0, 5));
   }
 
   emitError(err) {
@@ -184,10 +185,11 @@ class Player extends EventTarget {
   onTime() {
     const a = this.audio;
     const t = this.current;
-    if (t?.source === 'dz' && !this.usingPreview && a.currentTime >= DOWNLOAD_AFTER_SECONDS && !this.downloaded.has(t.id)) {
-      this.downloaded.add(t.id);
+    const key = t ? `${t.source}:${t.id}` : '';
+    if ((t?.source === 'dz' || t?.source === 'sc') && !this.usingPreview && a.currentTime >= DOWNLOAD_AFTER_SECONDS && !this.downloaded.has(key)) {
+      this.downloaded.add(key);
       // Lautloser Hintergrund-Download in die Jellyfin-Bibliothek
-      api.download('track', t.id, 'play').catch(() => {});
+      api.download(t.source === 'sc' ? 'sc' : 'track', t.id, 'play').catch(() => {});
     }
     const now = Date.now();
     if (now - this.lastPositionUpdate > 1000) {

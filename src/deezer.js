@@ -5,7 +5,17 @@ import { HttpError, TtlCache } from './util.js';
 const API = (process.env.DEEZER_API_URL || 'https://api.deezer.com').replace(/\/+$/, '');
 const cache = new TtlCache(10 * 60 * 1000, 1000);
 
+// Deezer erlaubt etwa 50 Anfragen pro 5 Sekunden → Abstand von mindestens 110 ms
+let nextSlot = 0;
+function throttle() {
+  const now = Date.now();
+  const wait = Math.max(0, nextSlot - now);
+  nextSlot = Math.max(now, nextSlot) + 110;
+  return wait ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+}
+
 async function dz(path) {
+  await throttle();
   const res = await fetch(API + path, { signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new HttpError(502, `Deezer ${res.status}`);
   const json = await res.json();
@@ -116,6 +126,16 @@ export async function chart() {
     artists: c.artists.data.map(mapArtist),
     playlists: (c.playlists?.data ?? []).map(mapPlaylist),
   };
+}
+
+export async function searchTracks(q, limit = 10) {
+  const r = await cached(`/search?q=${encodeURIComponent(q)}&limit=${limit}`, 30 * 60 * 1000);
+  return r.data.map((t) => mapTrack(t));
+}
+
+export async function byIsrc(isrc) {
+  const t = await cached(`/track/isrc:${encodeURIComponent(isrc)}`, 24 * 60 * 60 * 1000);
+  return t?.id ? mapTrack(t) : null;
 }
 
 export async function track(id) {

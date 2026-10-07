@@ -1,5 +1,5 @@
 // Service Worker: App-Shell offline, Cover-Cache, Audio und API immer live.
-const VERSION = 'v1.1.0';
+const VERSION = 'v1.2.0';
 const SHELL = `shell-${VERSION}`;
 const IMAGES = 'images-v1';
 const API = 'api-v1';

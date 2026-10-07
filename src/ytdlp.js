@@ -141,3 +141,21 @@ export async function resolve(track) {
   const best = list.map((e) => ({ e, s: score(track, e) })).sort((a, b) => b.s - a.s)[0].e;
   return extract(best.id);
 }
+
+/**
+ * Lädt das Audio einer Seite (SoundCloud o. ä.) als MP3 nach `${outBase}.mp3`.
+ * Braucht ffmpeg für die Umwandlung; MP3-Quellen werden nur umverpackt.
+ */
+export async function downloadAudio(url, outBase) {
+  await run(
+    [
+      '-f', 'ba[acodec=mp3]/ba[acodec^=mp4a]/ba',
+      '-x', '--audio-format', 'mp3', '--audio-quality', '192K',
+      ...(config.ffmpegBin.includes('/') ? ['--ffmpeg-location', config.ffmpegBin] : []),
+      '--no-playlist', '--no-warnings', '--no-progress', '--no-part',
+      '-o', `${outBase}.%(ext)s`,
+      url,
+    ],
+    180000,
+  );
+}

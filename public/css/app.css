@@ -213,6 +213,22 @@ svg { display: block; }
   color: var(--bg);
   flex: none;
 }
+.badge-src {
+  display: inline-grid;
+  place-items: center;
+  height: 14px;
+  padding: 0 3px;
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  border-radius: 3px;
+  background: #ff5500;
+  color: #fff;
+  flex: none;
+}
+.footnote details { margin-top: 6px; }
+.footnote summary { color: var(--accent); cursor: pointer; padding: 4px 0; }
+.footnote details div { padding: 3px 0; border-bottom: 0.5px solid var(--sep); }
 .local-dot svg { width: 13px; height: 13px; color: var(--text-2); }
 .row-fav { width: 36px; height: 36px; display: grid; place-items: center; color: var(--text-3); flex: none; }
 .row-fav svg { width: 20px; height: 20px; }
