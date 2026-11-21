@@ -68,5 +68,11 @@ export const config = {
     clientSecret: str('SPOTIFY_CLIENT_SECRET'),
   },
 
+  // Spotify-Playlists, die als Jellyfin-Playlists gespiegelt werden
+  sync: {
+    intervalHours: int('SYNC_INTERVAL_HOURS', 6),
+    playlists: str('SYNC_SPOTIFY_PLAYLISTS').split(/[\s,]+/).filter(Boolean),
+  },
+
   autoDownloadOnPlay: bool('AUTO_DOWNLOAD_ON_PLAY', true),
 };

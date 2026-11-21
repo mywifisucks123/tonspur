@@ -3,7 +3,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
-import { exists, ffmpeg, pruneDir, touch } from './media.js';
+import { exists, pruneDir, safeName, tagCopy, touch } from './media.js';
 import { HttpError, Limiter, TtlCache, log, readJson, writeJson } from './util.js';
 import * as yt from './ytdlp.js';
 
@@ -190,13 +190,6 @@ function pruneCache() {
 
 // --- In die Jellyfin-Bibliothek --------------------------------------------
 
-const safe = (s) =>
-  String(s || 'Unbekannt')
-    .replace(/[/\\:*?"<>|\u0000-\u001f]/g, '_')
-    .replace(/^\.+/, '')
-    .trim()
-    .slice(0, 120) || 'Unbekannt';
-
 export const isInLibrary = (id) => Boolean(library[String(id)]);
 
 /**
@@ -208,46 +201,9 @@ export async function saveToLibrary(id) {
   const src = await audioFile(id);
   if (src === library[id]) return src;
 
-  const dir = path.join(config.musicDir, safe(t.artist), safe(t.title));
-  const dest = path.join(dir, `${safe(t.title)}.mp3`);
-  await fs.mkdir(dir, { recursive: true });
-
-  let cover = null;
-  if (t.cover) {
-    cover = path.join(CACHE_DIR, `${id}.jpg`);
-    try {
-      const res = await fetch(t.cover, { signal: AbortSignal.timeout(8000) });
-      if (!res.ok) throw new Error(String(res.status));
-      await fs.writeFile(cover, Buffer.from(await res.arrayBuffer()));
-    } catch {
-      cover = null;
-    }
-  }
-
+  const dest = path.join(config.musicDir, safeName(t.artist), safeName(t.title), `${safeName(t.title)}.mp3`);
   const tags = { title: t.title, artist: t.artist, album_artist: t.artist, album: t.title, comment: t.permalink };
-  const build = (withCover) => {
-    const args = ['-y', '-loglevel', 'error', '-i', src];
-    if (withCover) {
-      args.push('-i', cover, '-map', '0:a', '-map', '1:v', '-disposition:v', 'attached_pic');
-      args.push('-metadata:s:v', 'title=Album cover', '-metadata:s:v', 'comment=Cover (front)');
-    } else {
-      args.push('-map', '0:a');
-    }
-    args.push('-c', 'copy', '-id3v2_version', '3');
-    for (const [k, v] of Object.entries(tags)) if (v) args.push('-metadata', `${k}=${v}`);
-    args.push(dest);
-    return args;
-  };
-
-  try {
-    await ffmpeg(build(Boolean(cover)));
-  } catch (err) {
-    if (!cover) throw err;
-    // Cover kaputt oder unbekanntes Format → ohne Cover ablegen statt gar nicht
-    log('soundcloud', `Cover nicht übernommen (${err.message})`);
-    await ffmpeg(build(false));
-  }
-  if (cover) fs.unlink(cover).catch(() => {});
+  await tagCopy(src, dest, tags, t.cover);
   library[id] = dest;
   await writeJson(LIB_FILE, library);
   log('soundcloud', `${t.artist} – ${t.title} → ${dest}`);

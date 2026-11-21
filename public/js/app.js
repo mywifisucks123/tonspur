@@ -102,12 +102,21 @@ async function route() {
   root.replaceChildren(result.el);
   mounted = { hash, tab, cleanup: result.cleanup };
 
-  window.scrollTo(0, back || result.keep ? scrollPos.get(hash) ?? 0 : 0);
+  window.scrollTo(0, back || result.keep || keepScroll ? scrollPos.get(hash) ?? 0 : 0);
+  keepScroll = false;
   markPlaying();
   updateHeads();
 }
 
 window.addEventListener('hashchange', route);
+
+/** Aktuelle Ansicht neu laden, ohne Verlauf oder Scrollposition zu verlieren. */
+let keepScroll = false;
+function rerender() {
+  keepScroll = true;
+  stack.pop();
+  route();
+}
 
 function goBack() {
   if (stack.length > 1) history.back();
@@ -178,6 +187,35 @@ document.addEventListener('click', (e) => {
       .download('playlist', dlp.dataset.downloadPlaylist, 'manual', false, dlp.dataset.source)
       .then(() => toast(`${n} Titel werden in die Bibliothek geladen`))
       .catch((err) => toast(`Fehler: ${err.message}`));
+    return;
+  }
+
+  const syncToggle = t.closest('[data-sync-toggle]');
+  if (syncToggle) {
+    const on = !syncToggle.dataset.on;
+    syncToggle.disabled = true;
+    api
+      .setSync(syncToggle.dataset.syncToggle, on)
+      .then(() => {
+        toast(on ? 'Sync an – Titel werden geladen, die Playlist erscheint in Jellyfin' : 'Sync beendet – die Jellyfin-Playlist bleibt bestehen');
+        rerender();
+      })
+      .catch((err) => toast(`Fehler: ${err.message}`))
+      .finally(() => (syncToggle.disabled = false));
+    return;
+  }
+  const syncRun = t.closest('[data-sync-run]');
+  if (syncRun) {
+    syncRun.disabled = true;
+    toast('Abgleich läuft …');
+    api
+      .runSync(syncRun.dataset.syncRun)
+      .then(() => {
+        toast('Abgleich fertig');
+        rerender();
+      })
+      .catch((err) => toast(`Fehler: ${err.message}`))
+      .finally(() => (syncRun.disabled = false));
     return;
   }
 

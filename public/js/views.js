@@ -427,6 +427,20 @@ export async function playlistView(id, source = 'dz') {
   api.prefetch(p.tracks.slice(0, source === 'sc' ? 3 : 30));
 
   const missing = p.missing ?? [];
+  const syncState = source === 'sp' ? await api.syncStatus(p.id).catch(() => ({ enabled: false })) : null;
+  const syncBox = syncState
+    ? html`<div class="sync-box ${syncState.enabled ? 'on' : ''}">
+        <div class="sync-head">
+          <div>
+            <div class="sync-title">Jellyfin-Playlist</div>
+            <div class="sync-sub">${esc(syncText(syncState))}</div>
+          </div>
+          <button class="btn small" data-sync-toggle="${esc(p.id)}" data-on="${syncState.enabled ? '1' : ''}">${syncState.enabled ? 'Sync beenden' : 'Synchronisieren'}</button>
+        </div>
+        ${syncState.enabled ? `<button class="btn small sync-run" data-sync-run="${esc(p.id)}">Jetzt abgleichen</button>` : ''}
+      </div>`
+    : '';
+
   const importNote =
     source === 'sp'
       ? html`<div class="footnote">
@@ -456,10 +470,28 @@ export async function playlistView(id, source = 'dz') {
         ${source === 'sp' ? '' : favButton('playlist', { ...p, tracks: undefined }, 'btn fav')}
         <button class="btn fav" data-download-playlist="${esc(p.id)}" data-source="${source}" data-count="${p.tracks.length}" aria-label="Playlist laden">${icons.download}</button>
       </div>
+      ${syncBox}
       <div class="list">${trackRows(p.tracks)}</div>
       ${importNote}
     `),
   };
+}
+
+function syncText(s) {
+  if (!s.enabled) {
+    return 'Aus. Eingeschaltet lädt der Server alle Titel in die Bibliothek und hält die Playlist in Jellyfin (und damit in Finamp) aktuell.';
+  }
+  if (s.error) return `Fehler beim letzten Abgleich: ${s.error}`;
+  if (!s.result) return 'Wird eingerichtet … die ersten Titel erscheinen, sobald sie geladen sind.';
+  const { total, inLibrary, pending } = s.result;
+  const when = s.lastBuild || s.lastRefresh;
+  return [
+    `${inLibrary} von ${total} Titeln in Jellyfin`,
+    pending ? `${pending} werden noch geladen` : null,
+    when ? `Stand ${new Date(when).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
 }
 
 /** Spotify-/SoundCloud-Link übernehmen und zur passenden Seite weiterleiten. */
@@ -564,9 +596,10 @@ export function libraryView() {
       else if (tab === 'albums') renderAlbums();
       else if (tab === 'playlists') {
         body.innerHTML = skeleton(3);
-        const imported = await api.imports().catch(() => []);
+        const [imported, synced] = await Promise.all([api.imports().catch(() => []), api.syncStatus().catch(() => [])]);
         if (current !== tab) return;
-        renderPlaylists(imported);
+        const on = new Set(synced.filter((x) => x.enabled).map((x) => x.id));
+        renderPlaylists(imported.map((p) => (on.has(p.id) ? { ...p, owner: [p.owner, 'Jellyfin-Sync'].filter(Boolean).join(' · ') } : p)));
       }
       else if (tab === 'local') {
         body.innerHTML = skeleton(4);

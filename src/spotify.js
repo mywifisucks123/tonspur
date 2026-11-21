@@ -4,6 +4,7 @@
 // Ohne Zugangsdaten liest Tonspur die öffentliche Einbettungsseite (open.spotify.com/embed),
 // die funktioniert auch für Spotifys eigene Playlists, liefert aber höchstens ~100 Titel.
 // Mit SPOTIFY_CLIENT_ID/SECRET kommt die komplette Liste inkl. ISRC über die Web-API.
+import { createHash } from 'node:crypto';
 import { config } from './config.js';
 import * as deezer from './deezer.js';
 import { HttpError, log, norm } from './util.js';
@@ -185,6 +186,7 @@ export async function importLink(link) {
   const started = Date.now();
   const matched = [];
   const missing = [];
+  const missingTracks = [];
   const results = [];
   // Parallel, aber gebremst – Deezer erlaubt ~50 Anfragen / 5 s (Bremse sitzt in deezer.js)
   let next = 0;
@@ -196,7 +198,13 @@ export async function importLink(link) {
       }
     }),
   );
-  data.tracks.forEach((sp, i) => (results[i] ? matched.push(results[i]) : missing.push(`${sp.artist} – ${sp.title}`)));
+  data.tracks.forEach((sp, i) => {
+    if (results[i]) return void matched.push({ ...results[i], position: i });
+    missing.push(`${sp.artist} – ${sp.title}`);
+    // Stabile ID, damit der Titel bei jedem Abgleich derselbe bleibt
+    const id = `sp-${createHash('sha1').update(norm(`${sp.artist}|${sp.title}`)).digest('hex').slice(0, 16)}`;
+    missingTracks.push({ id, source: 'sp', title: sp.title, artist: sp.artist, album: '', duration: sp.duration, cover: null, position: i });
+  });
   log('spotify', `${data.title}: ${matched.length}/${data.tracks.length} bei Deezer gefunden (${((Date.now() - started) / 1000).toFixed(1)} s)`);
 
   return {
@@ -211,6 +219,7 @@ export async function importLink(link) {
     trackCount: matched.length,
     tracks: matched,
     missing,
+    missingTracks,
     complete: hasApi || data.tracks.length < 100,
     importedAt: Date.now(),
   };

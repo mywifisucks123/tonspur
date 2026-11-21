@@ -13,11 +13,16 @@ export function authHeaders() {
   };
 }
 
-async function jf(path, { method = 'GET', timeout = 8000 } = {}) {
+async function jf(path, { method = 'GET', timeout = 8000, body } = {}) {
   if (!apiKey) throw new HttpError(503, 'JELLYFIN_API_KEY fehlt');
   const res = await fetch(BASE + path, {
     method,
-    headers: { ...authHeaders(), Accept: 'application/json' },
+    headers: {
+      ...authHeaders(),
+      Accept: 'application/json',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(timeout),
   });
   if (!res.ok) throw new HttpError(res.status === 401 ? 502 : res.status, `Jellyfin ${res.status} ${path}`);
@@ -164,6 +169,52 @@ export async function refreshLibrary() {
     await jf('/Library/Refresh', { method: 'POST' });
   }
   log('jellyfin', 'Bibliothek-Scan gestartet');
+}
+
+// --- Playlists (erscheinen in jeder Jellyfin-App, z. B. Finamp) --------------
+
+export async function playlistExists(id) {
+  const uid = await userId();
+  const res = await jf(`/Items?userId=${uid}&Ids=${encodeURIComponent(id)}`).catch(() => null);
+  return Boolean(res?.Items?.length);
+}
+
+async function playlistEntries(id) {
+  const uid = await userId();
+  const res = await jf(`/Playlists/${encodeURIComponent(id)}/Items?userId=${uid}`);
+  return (res?.Items ?? []).map((i) => ({ itemId: i.Id, entryId: i.PlaylistItemId }));
+}
+
+export async function createPlaylist(name, ids) {
+  const uid = await userId();
+  const res = await jf('/Playlists', {
+    method: 'POST',
+    body: { Name: name, Ids: ids, UserId: uid, MediaType: 'Audio', IsPublic: true },
+    timeout: 30000,
+  });
+  log('jellyfin', `Playlist "${name}" angelegt (${ids.length} Titel)`);
+  return res.Id;
+}
+
+/** Inhalt einer Playlist exakt auf `ids` (in dieser Reihenfolge) setzen. Liefert true bei Änderung. */
+export async function setPlaylistItems(id, ids) {
+  const uid = await userId();
+  const current = await playlistEntries(id);
+  if (current.length === ids.length && current.every((e, i) => e.itemId === ids[i])) return false;
+  const pid = encodeURIComponent(id);
+  // Leeren und in richtiger Reihenfolge neu befüllen – die Playlist-ID bleibt gleich,
+  // Apps behalten sie also als dieselbe Playlist (inkl. Offline-Download).
+  for (let i = 0; i < current.length; i += 100) {
+    const entries = current.slice(i, i + 100).map((e) => e.entryId).join(',');
+    await jf(`/Playlists/${pid}/Items?entryIds=${entries}`, { method: 'DELETE', timeout: 30000 });
+  }
+  for (let i = 0; i < ids.length; i += 100) {
+    await jf(`/Playlists/${pid}/Items?ids=${ids.slice(i, i + 100).join(',')}&userId=${uid}`, {
+      method: 'POST',
+      timeout: 30000,
+    });
+  }
+  return true;
 }
 
 export async function ping() {

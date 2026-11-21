@@ -226,6 +226,21 @@ svg { display: block; }
   color: #fff;
   flex: none;
 }
+.sync-box {
+  margin: 10px var(--gutter) 6px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 0.5px solid var(--sep);
+}
+.sync-box.on { border-color: rgba(48, 209, 88, 0.45); }
+.sync-head { display: flex; align-items: center; gap: 12px; }
+.sync-head > div { flex: 1; min-width: 0; }
+.sync-title { font-weight: 600; font-size: 15px; }
+.sync-box.on .sync-title::after { content: " ●"; color: var(--ok); font-size: 11px; vertical-align: 2px; }
+.sync-sub { color: var(--text-2); font-size: 13px; margin-top: 3px; line-height: 1.35; }
+.sync-box .btn { flex: none; background: var(--surface-2); }
+.sync-run { margin-top: 10px; }
 .footnote details { margin-top: 6px; }
 .footnote summary { color: var(--accent); cursor: pointer; padding: 4px 0; }
 .footnote details div { padding: 3px 0; border-bottom: 0.5px solid var(--sep); }

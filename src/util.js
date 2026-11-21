@@ -127,3 +127,11 @@ export async function writeJson(file, data) {
 
 export const log = (scope, ...args) =>
   console.log(new Date().toISOString().slice(11, 19), `[${scope}]`, ...args);
+
+export function debounce(fn, ms) {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+}

@@ -8,7 +8,7 @@ import * as jellyfin from './jellyfin.js';
 import * as yt from './ytdlp.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { downloadChunked, exists, ffmpeg, ffmpegVersion, pruneDir, touch } from './media.js';
+import { downloadChunked, exists, ffmpeg, ffmpegVersion, pruneDir, safeName, tagCopy, touch } from './media.js';
 import { Limiter, TtlCache, log, readJson, withTimeout, writeJson } from './util.js';
 
 const ytCache = new TtlCache(3 * 60 * 60 * 1000, 2000);
@@ -23,6 +23,7 @@ let videoIds = {};
 let saveTimer;
 export async function init() {
   videoIds = await readJson(ID_FILE, {});
+  ytLibrary = await readJson(YT_LIB_FILE, {});
 }
 function rememberVideo(id, videoId) {
   if (videoIds[id] === videoId) return;
@@ -163,4 +164,30 @@ export async function resolve(id, { wait = true } = {}) {
 
 export function invalidateYoutube(id) {
   ytCache.delete(id);
+}
+
+// --- YouTube als Quelle für die Bibliothek --------------------------------
+// Rückfall, wenn Deemix einen Titel nicht liefern kann, und für Spotify-Titel, die es bei
+// Deezer nicht gibt. Ergebnis: normale M4A mit Tags und Cover im Musikordner.
+
+const YT_LIB_FILE = path.join(config.dataDir, 'yt-library.json');
+let ytLibrary = {};
+
+export const isInYoutubeLibrary = (id) => Boolean(ytLibrary[id]);
+
+/** @param track {id, title, artist, album?, duration?, cover?} – id ist Deezer-ID oder "sp-…" */
+export async function saveYoutubeToLibrary(track) {
+  if (ytLibrary[track.id] && (await exists(ytLibrary[track.id]))) return ytLibrary[track.id];
+  if (!(await yt.version())) throw new Error('yt-dlp nicht verfügbar');
+  if (!(await ffmpegVersion())) throw new Error('ffmpeg nicht installiert');
+  const src = await youtube(track, { urgent: false });
+  const file = await youtubeFile(track.id, src);
+  const album = track.album || track.title;
+  const dest = path.join(config.musicDir, safeName(track.artist), safeName(album), `${safeName(track.title)}.m4a`);
+  const tags = { title: track.title, artist: track.artist, album_artist: track.artist, album, comment: 'YouTube' };
+  await tagCopy(file, dest, tags, track.cover);
+  ytLibrary[track.id] = dest;
+  await writeJson(YT_LIB_FILE, ytLibrary);
+  log('yt-dlp', `${track.artist} – ${track.title} → Bibliothek (YouTube)`);
+  return dest;
 }

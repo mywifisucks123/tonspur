@@ -11,6 +11,7 @@ import { proxy, proxyChunked } from './proxy.js';
 import * as resolver from './resolver.js';
 import * as soundcloud from './soundcloud.js';
 import * as spotify from './spotify.js';
+import * as sync from './sync.js';
 import { HttpError, log } from './util.js';
 import * as yt from './ytdlp.js';
 
@@ -61,8 +62,19 @@ api.post('/import', async (req, res) => {
 });
 
 api.get('/imports', (_req, res) => res.json(imports.list()));
+
+// --- Spotify → Jellyfin-Playlists ---------------------------------------------
+
+api.get('/sync', (_req, res) => res.json(sync.status()));
+api.get('/sync/:id', (req, res) => res.json(sync.get(req.params.id)));
+api.post('/sync/:id', async (req, res) => res.json(await sync.setEnabled(req.params.id, Boolean(req.body?.enabled))));
+api.post('/sync/:id/run', async (req, res) => {
+  if (!sync.get(req.params.id).enabled) throw new HttpError(400, 'Sync ist für diese Playlist aus');
+  res.json(await sync.refresh(req.params.id));
+});
 api.get('/imports/:id', (req, res) => res.json(imports.get(req.params.id)));
 api.delete('/imports/:id', async (req, res) => {
+  if (sync.get(req.params.id).enabled) await sync.setEnabled(req.params.id, false);
   await imports.remove(req.params.id);
   res.json(imports.list());
 });
@@ -210,6 +222,7 @@ api.get('/health', async (_req, res) => {
     ffmpeg: ff ? { ok: true, version: ff } : { ok: false, error: 'nicht installiert (brew install ffmpeg)' },
     soundcloud: sc,
     spotify: { ok: true, mode: config.spotify.clientId ? 'Web-API' : 'Einbettung (max. ~100 Titel)' },
+    sync: { playlists: sync.status().filter((s) => s.enabled).length, intervalHours: config.sync.intervalHours },
     autoDownloadOnPlay: config.autoDownloadOnPlay,
   });
 });
@@ -248,6 +261,7 @@ app.use((req, res, next) => {
 });
 
 await Promise.all([favorites.init(), downloads.init(), resolver.init(), soundcloud.init(), imports.init()]);
+await sync.init();
 
 app.listen(config.port, config.host, async () => {
   log('server', `läuft auf http://${config.host}:${config.port}`);

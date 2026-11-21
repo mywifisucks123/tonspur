@@ -1,9 +1,11 @@
 // Hintergrund-Downloads: Deemix-Queue füttern, Fortschritt pollen, danach Jellyfin scannen.
+import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { config } from './config.js';
 import * as deemix from './deemix.js';
 import * as deezer from './deezer.js';
 import * as jellyfin from './jellyfin.js';
+import * as resolver from './resolver.js';
 import * as soundcloud from './soundcloud.js';
 import { log, readJson, writeJson } from './util.js';
 
@@ -11,6 +13,9 @@ const FILE = path.join(config.dataDir, 'downloads.json');
 const POLL_MS = 3000;
 const STUCK_MS = 30 * 60 * 1000;
 const KEEP = 300;
+
+/** Meldet 'scanned', sobald Jellyfin nach neuen Downloads gescannt hat. */
+export const events = new EventEmitter();
 
 /** @type {Map<string, any>} key `${type}:${id}` */
 const jobs = new Map();
@@ -22,7 +27,7 @@ export async function init() {
   const saved = await readJson(FILE, []);
   for (const job of saved) {
     // Nach einem Neustart weiter beobachten, was noch offen war
-    if (job.engine === 'sc' && ['queued', 'downloading'].includes(job.status)) {
+    if ((job.engine === 'sc' || job.engine === 'yt') && ['queued', 'downloading'].includes(job.status)) {
       Object.assign(job, { status: 'failed', error: 'durch Neustart unterbrochen' });
     }
     jobs.set(job.key, job);
@@ -31,7 +36,7 @@ export async function init() {
 }
 
 const active = () =>
-  [...jobs.values()].filter((j) => j.engine !== 'sc' && (j.status === 'queued' || j.status === 'downloading'));
+  [...jobs.values()].filter((j) => !j.engine && (j.status === 'queued' || j.status === 'downloading'));
 
 function persist() {
   clearTimeout(saveTimer);
@@ -56,19 +61,20 @@ export function list() {
  */
 const inflight = new Map();
 
-export function enqueue({ type, id, reason = 'manual', force = false }) {
-  if (!['track', 'album', 'sc'].includes(type)) throw new Error('type muss track, album oder sc sein');
+export function enqueue({ type, id, reason = 'manual', force = false, meta }) {
+  if (!['track', 'album', 'sc', 'yt'].includes(type)) throw new Error('type muss track, album, sc oder yt sein');
   const key = `${type}:${id}`;
   const existing = jobs.get(key);
   if (existing && !force && existing.status !== 'failed') return Promise.resolve(existing);
   if (inflight.has(key)) return inflight.get(key);
-  const create = type === 'sc' ? createScJob : createJob;
-  const p = create(key, type, id, reason, force).finally(() => inflight.delete(key));
+  const create = type === 'sc' ? createScJob : type === 'yt' ? createYtJob : createJob;
+  const p = create(key, type, id, reason, force, meta).finally(() => inflight.delete(key));
   inflight.set(key, p);
   return p;
 }
 
 async function createJob(key, type, id, reason, force) {
+  // (meta-Parameter wird hier nicht gebraucht – Deezer liefert die Angaben selbst)
   const meta = type === 'track' ? await deezer.track(id) : await deezer.album(id);
   const job = {
     key,
@@ -102,9 +108,54 @@ async function createJob(key, type, id, reason, force) {
     log('downloads', `${type} ${meta.artist} – ${meta.title} (${reason}) → Deemix`);
     startPolling();
   } catch (err) {
-    update(job, { status: 'failed', error: err.message });
     log('downloads', `Fehler bei ${key}: ${err.message}`);
+    if (type === 'track') youtubeFallback(job, meta, err.message);
+    else update(job, { status: 'failed', error: err.message });
   }
+  return job;
+}
+
+/**
+ * Deemix kann den Titel nicht liefern (Lizenz, Region, Konto) → dieselbe Aufnahme von
+ * YouTube holen und als M4A mit Tags in den Musikordner legen.
+ */
+function youtubeFallback(job, meta, why) {
+  update(job, { status: 'downloading', engine: 'yt', progress: 30, error: `${why} → YouTube` });
+  resolver
+    .saveYoutubeToLibrary(meta)
+    .then(() => finish(job, 'done', 'über YouTube'))
+    .catch((err) => finish(job, 'failed', `${why}; YouTube: ${err.message}`));
+}
+
+/** Titel ohne Deezer-Gegenstück (z. B. aus Spotify-Playlists): direkt von YouTube. */
+async function createYtJob(key, type, id, reason, force, meta) {
+  if (!meta?.title) throw new Error('Titelangaben fehlen');
+  const job = {
+    key,
+    type,
+    engine: 'yt',
+    id: String(id),
+    title: meta.title,
+    artist: meta.artist,
+    cover: meta.cover ?? null,
+    reason,
+    status: 'downloading',
+    progress: 30,
+    uuids: [],
+    error: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  jobs.set(key, job);
+  persist();
+  if (!force && resolver.isInYoutubeLibrary(id)) {
+    update(job, { status: 'skipped', progress: 100, error: 'schon in der Bibliothek' });
+    return job;
+  }
+  resolver
+    .saveYoutubeToLibrary({ ...meta, id: String(id) })
+    .then(() => finish(job, 'done'))
+    .catch((err) => finish(job, 'failed', err.message));
   return job;
 }
 
@@ -185,7 +236,15 @@ async function poll() {
     const failed = states.every((s) => s.status === 'failed');
     const done = states.every((s) => ['completed', 'withErrors', 'failed'].includes(s.status));
     if (failed) {
-      finish(job, 'failed', 'Deemix meldet Fehler (Song nicht verfügbar?)');
+      if (job.type === 'track') {
+        update(job, { engine: 'yt' }); // sofort, damit die nächste Abfrage ihn nicht noch mal erwischt
+        deezer
+          .track(job.id)
+          .then((meta) => youtubeFallback(job, meta, 'Deemix meldet Fehler'))
+          .catch((err) => finish(job, 'failed', err.message));
+      } else {
+        finish(job, 'failed', 'Deemix meldet Fehler (Song nicht verfügbar?)');
+      }
     } else if (done) {
       const errors = states.some((s) => s.status === 'withErrors');
       finish(job, 'done', errors ? 'teilweise fehlgeschlagen' : null);
@@ -213,7 +272,10 @@ function scheduleScan() {
       await jellyfin.refreshLibrary();
       // Jellyfin braucht etwas für den Scan; danach Abgleich-Cache verwerfen
       setTimeout(jellyfin.forgetMatches, 20000);
-      setTimeout(jellyfin.forgetMatches, 60000);
+      setTimeout(() => {
+        jellyfin.forgetMatches();
+        events.emit('scanned');
+      }, 60000);
     } catch (err) {
       log('jellyfin', `Scan fehlgeschlagen: ${err.message}`);
     }

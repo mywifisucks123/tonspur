@@ -87,3 +87,54 @@ export function touch(file) {
   const now = new Date();
   fs.utimes(file, now, now).catch(() => {});
 }
+
+export const safeName = (s) =>
+  String(s || 'Unbekannt')
+    .replace(/[/\\:*?"<>|\u0000-\u001f]/g, '_')
+    .replace(/^\.+/, '')
+    .trim()
+    .slice(0, 120) || 'Unbekannt';
+
+/**
+ * Kopiert eine Audiodatei mit sauberen Tags (und Cover, falls ladbar) nach `dest`.
+ * Ohne Neukodierung; ist das Cover kaputt, wird ohne Cover abgelegt statt gar nicht.
+ */
+export async function tagCopy(src, dest, tags, coverUrl) {
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  let cover = null;
+  if (coverUrl) {
+    cover = `${dest}.cover.jpg`;
+    try {
+      const res = await fetch(coverUrl, { signal: AbortSignal.timeout(8000) });
+      if (!res.ok) throw new Error(String(res.status));
+      await fs.writeFile(cover, Buffer.from(await res.arrayBuffer()));
+    } catch {
+      cover = null;
+    }
+  }
+  const mp3 = dest.toLowerCase().endsWith('.mp3');
+  const build = (withCover) => {
+    const args = ['-y', '-loglevel', 'error', '-i', src];
+    if (withCover) {
+      args.push('-i', cover, '-map', '0:a', '-map', '1:v', '-disposition:v', 'attached_pic');
+      if (mp3) args.push('-metadata:s:v', 'title=Album cover', '-metadata:s:v', 'comment=Cover (front)');
+    } else {
+      args.push('-map', '0:a');
+    }
+    args.push('-c', 'copy');
+    if (mp3) args.push('-id3v2_version', '3');
+    else args.push('-movflags', '+faststart');
+    for (const [k, v] of Object.entries(tags)) if (v) args.push('-metadata', `${k}=${v}`);
+    args.push(dest);
+    return args;
+  };
+  try {
+    await ffmpeg(build(Boolean(cover)));
+  } catch (err) {
+    if (!cover) throw err;
+    await ffmpeg(build(false));
+  } finally {
+    if (cover) fs.unlink(cover).catch(() => {});
+  }
+  return dest;
+}
