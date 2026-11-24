@@ -128,6 +128,15 @@ export async function build(id) {
   } else if (await jellyfin.setPlaylistItems(s.jellyfinId, ids)) {
     log('sync', `${playlist.title}: ${ids.length}/${wanted.length} Titel in Jellyfin`);
   }
+  // Spotify-Cover als Playlist-Bild – nur wenn es neu ist oder sich geändert hat
+  if (playlist.cover && s.coverUrl !== playlist.cover) {
+    try {
+      await jellyfin.setItemImage(s.jellyfinId, playlist.cover);
+      s.coverUrl = playlist.cover;
+    } catch (err) {
+      log('sync', `${playlist.title}: Cover nicht gesetzt (${err.message})`);
+    }
+  }
   s.lastBuild = Date.now();
   s.result = { total: wanted.length, inLibrary: ids.length, pending };
   await save();

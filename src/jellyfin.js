@@ -196,6 +196,34 @@ export async function createPlaylist(name, ids) {
   return res.Id;
 }
 
+/**
+ * Bild (z. B. Spotify-Cover) als Hauptbild eines Eintrags setzen. Jellyfin erwartet den
+ * Bildinhalt Base64-kodiert im Body. Klappt das nicht, darf Jellyfin das Bild selbst laden.
+ */
+export async function setItemImage(id, imageUrl) {
+  const item = encodeURIComponent(id);
+  try {
+    const img = await fetch(imageUrl, { signal: AbortSignal.timeout(10000) });
+    if (!img.ok) throw new Error(`Bild ${img.status}`);
+    const type = (img.headers.get('content-type') || 'image/jpeg').split(';')[0];
+    if (!type.startsWith('image/')) throw new Error(`kein Bild (${type})`);
+    const data = Buffer.from(await img.arrayBuffer()).toString('base64');
+    const res = await fetch(`${BASE}/Items/${item}/Images/Primary`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': type },
+      body: data,
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) throw new Error(`Jellyfin ${res.status}`);
+  } catch (err) {
+    log('jellyfin', `Cover-Upload: ${err.message} – Jellyfin lädt es selbst`);
+    await jf(`/Items/${item}/RemoteImages/Download?type=Primary&imageUrl=${encodeURIComponent(imageUrl)}`, {
+      method: 'POST',
+      timeout: 20000,
+    });
+  }
+}
+
 /** Inhalt einer Playlist exakt auf `ids` (in dieser Reihenfolge) setzen. Liefert true bei Änderung. */
 export async function setPlaylistItems(id, ids) {
   const uid = await userId();

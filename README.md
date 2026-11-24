@@ -16,6 +16,7 @@ Für den Alltag auf dem iPhone brauchst du die Tonspur-Web-App nicht. Stabiler i
 
 - **Spotify-Playlists** werden als echte Jellyfin-Playlists gespiegelt. Neue Titel bei Spotify landen automatisch in der Bibliothek und in der Playlist, entfernte verschwinden aus der Playlist (die Datei bleibt). Abgleich alle `SYNC_INTERVAL_HOURS` Stunden (Standard 6) und nach jedem Download-Schub.
 - Titel holt Deemix von Deezer. Kann Deemix einen Titel nicht liefern oder gibt es ihn bei Deezer nicht, kommt er über YouTube Music als M4A mit Tags und Cover in den Musikordner.
+- Das Spotify-Cover wird als Bild der Jellyfin-Playlist gesetzt (und erneuert, wenn es sich bei Spotify ändert).
 - Die Playlist behält in Jellyfin dieselbe ID. Finamp aktualisiert sie also, statt eine neue anzulegen, auch wenn du sie offline geladen hast.
 
 **Playlists einrichten**, zwei Wege:
@@ -75,6 +76,8 @@ cd ~/tonspur
 cp .env.example .env          # JELLYFIN_API_KEY bleibt erst mal leer
 docker compose -f homeserver.compose.yml up -d --build
 ```
+
+Ist Port 3000 auf dem Server schon belegt, in der `.env` z. B. `TONSPUR_PORT=8787` setzen.
 
 Danach:
 

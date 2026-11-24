@@ -47,7 +47,8 @@ services:
       DEEMIX_URL: http://deemix:6595
       MUSIC_DIR: /music
     ports:
-      - "3000:3000"
+      # Belegt schon ein anderer Dienst Port 3000: TONSPUR_PORT=8787 (o. ä.) in die .env
+      - "${TONSPUR_PORT:-3000}:3000"
     volumes:
       - ./data:/app/data
       - ${MUSIC_HOST_DIR:-./music}:/music
