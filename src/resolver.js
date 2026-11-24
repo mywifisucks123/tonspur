@@ -177,7 +177,8 @@ export function invalidateYoutube(id) {
 const YT_LIB_FILE = path.join(config.dataDir, 'yt-library.json');
 let ytLibrary = {};
 
-export const isInYoutubeLibrary = (id) => Boolean(ytLibrary[id]);
+/** Liegt die YouTube-Datei noch im Musikordner? (Gelöschte Dateien zählen nicht.) */
+export const isInYoutubeLibrary = async (id) => Boolean(ytLibrary[id]) && (await exists(ytLibrary[id]));
 
 /** @param track {id, title, artist, album?, duration?, cover?} – id ist Deezer-ID oder "sp-…" */
 export async function saveYoutubeToLibrary(track) {

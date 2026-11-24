@@ -130,45 +130,92 @@ async function fromEmbed({ type, id }) {
 
 // --- Abgleich mit Deezer ---------------------------------------------------
 
-function pick(sp, candidates) {
-  const title = norm(sp.title.replace(/\s+-\s+.*$/, ''));
-  const artist = norm(sp.artist);
-  let best = null;
-  let bestScore = -Infinity;
-  for (const c of candidates) {
-    const ct = norm(c.title);
-    let s = 0;
-    if (ct === title) s += 50;
-    else if (ct.startsWith(title) || title.startsWith(ct)) s += 25;
-    else continue;
-    if (norm(c.artist).includes(artist) || artist.includes(norm(c.artist))) s += 30;
-    if (sp.duration && c.duration) {
-      const diff = Math.abs(sp.duration - c.duration);
-      s += diff <= 3 ? 25 : diff <= 10 ? 10 : -30;
-    }
-    if (s > bestScore) {
-      best = c;
-      bestScore = s;
-    }
-  }
-  return bestScore >= 55 ? best : null;
+// --- Abgleich Spotify → Deezer ----------------------------------------------
+// Deezers Suche sortiert oft schlecht (bei "50 Cent Candy Shop" steht das Original nicht
+// vorn) und die Detailsuche artist:"…" track:"…" liefert manchmal gar nichts. Deshalb
+// mehrere Suchen, alle Treffer bewerten und den besten nehmen.
+
+// Zusätze, die Spotify und Deezer unterschiedlich schreiben
+const NOISE = /\s*[([][^)\]]*\b(feat|ft|with|radio edit|edit|remaster(ed)?|version|mono|stereo|original mix|single|explicit|clean)\b[^)\]]*[)\]]|\s+-\s+.*$/gi;
+const cleanTitle = (t) => t.replace(NOISE, '').trim() || t;
+const words = (t) => new Set(norm(t).split(' ').filter(Boolean));
+
+/** Titel-Ähnlichkeit 0–50 */
+function titleScore(spTitle, dzTitle) {
+  const a = norm(spTitle);
+  const b = norm(dzTitle);
+  if (a === b) return 50;
+  const ca = norm(cleanTitle(spTitle));
+  const cb = norm(cleanTitle(dzTitle));
+  if (ca && ca === cb) return 45;
+  // Wortvergleich: "Nocturne Op. 9 No. 2" ⊂ "Nocturne No. 2 in E-Flat Major, Op. 9 No. 2"
+  const wa = words(cleanTitle(spTitle));
+  const wb = words(cleanTitle(dzTitle));
+  if (!wa.size || !wb.size) return 0;
+  let common = 0;
+  for (const w of wa) if (wb.has(w)) common++;
+  const contained = common / Math.min(wa.size, wb.size);
+  const jaccard = common / (wa.size + wb.size - common);
+  if (contained === 1 && Math.min(wa.size, wb.size) >= 2) return 30;
+  if (jaccard >= 0.6) return 25;
+  return 0;
 }
+
+function score(sp, c) {
+  const t = titleScore(sp.title, c.title);
+  if (!t) return -Infinity;
+  let s = t;
+  const ca = norm(c.artist);
+  const artistHit = (sp.artists?.length ? sp.artists : [sp.artist]).some((a) => {
+    const na = norm(a);
+    return na && ca && (ca.includes(na) || na.includes(ca));
+  });
+  if (artistHit) s += 30;
+  if (sp.duration && c.duration) {
+    const diff = Math.abs(sp.duration - c.duration);
+    s += diff <= 3 ? 25 : diff <= 10 ? 10 : -30;
+  }
+  return s;
+}
+
+const GOOD = 55; // genügt, z. B. gleicher Titel + gleiche Länge, oder ähnlicher Titel + Künstler
+const SURE = 90; // sicher: Titel + Künstler + Länge – dann nicht weitersuchen
 
 async function match(sp) {
   if (sp.isrc) {
     const hit = await deezer.byIsrc(sp.isrc).catch(() => null);
     if (hit) return hit;
   }
-  // Alle genannten Künstler probieren: Bei Klassik steht bei Spotify zuerst der Komponist,
-  // bei Deezer der Interpret
   const title = sp.title.replace(/"/g, '');
-  for (const artist of (sp.artists?.length ? sp.artists : [sp.artist]).slice(0, 3)) {
-    const strict = await deezer.searchTracks(`artist:"${artist}" track:"${title}"`, 8).catch(() => []);
-    const hit = pick({ ...sp, artist }, strict);
-    if (hit) return hit;
+  const clean = cleanTitle(title);
+  const artists = (sp.artists?.length ? sp.artists : [sp.artist]).filter(Boolean).slice(0, 3);
+  const queries = [
+    ...artists.map((a) => [`artist:"${a}" track:"${title}"`, 10]),
+    [`track:"${title}"`, 25],
+    [`${artists[0] ?? ''} ${clean}`, 25],
+  ];
+  if (clean !== title) queries.push([`track:"${clean}"`, 25], [`artist:"${artists[0] ?? ''}" track:"${clean}"`, 10]);
+
+  let best = null;
+  let bestScore = -Infinity;
+  const seen = new Set();
+  for (const [q, limit] of queries) {
+    if (seen.has(q)) continue;
+    seen.add(q);
+    const results = await deezer.searchTracks(q, limit).catch((err) => {
+      log('spotify', `Deezer-Suche "${q}": ${err.message}`);
+      return [];
+    });
+    for (const c of results) {
+      const s = score(sp, c);
+      if (s > bestScore) {
+        best = c;
+        bestScore = s;
+      }
+    }
+    if (bestScore >= SURE) break;
   }
-  const loose = await deezer.searchTracks(`${sp.artist} ${sp.title.replace(/\s+-\s+.*$/, '')}`, 10).catch(() => []);
-  return pick(sp, loose);
+  return bestScore >= GOOD ? best : null;
 }
 
 /** Spotify-Link → Playlist mit Deezer-Titeln (nicht gefundene separat). */
@@ -229,3 +276,6 @@ export async function importLink(link) {
     importedAt: Date.now(),
   };
 }
+
+// Nur für Tests
+export const _test = { titleScore, score, cleanTitle };

@@ -148,7 +148,7 @@ async function createYtJob(key, type, id, reason, force, meta) {
   };
   jobs.set(key, job);
   persist();
-  if (!force && resolver.isInYoutubeLibrary(id)) {
+  if (!force && (await resolver.isInYoutubeLibrary(id))) {
     update(job, { status: 'skipped', progress: 100, error: 'schon in der Bibliothek' });
     return job;
   }
