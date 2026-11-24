@@ -159,9 +159,14 @@ async function match(sp) {
     const hit = await deezer.byIsrc(sp.isrc).catch(() => null);
     if (hit) return hit;
   }
-  const strict = await deezer.searchTracks(`artist:"${sp.artist}" track:"${sp.title.replace(/"/g, '')}"`, 8).catch(() => []);
-  const hit = pick(sp, strict);
-  if (hit) return hit;
+  // Alle genannten Künstler probieren: Bei Klassik steht bei Spotify zuerst der Komponist,
+  // bei Deezer der Interpret
+  const title = sp.title.replace(/"/g, '');
+  for (const artist of (sp.artists?.length ? sp.artists : [sp.artist]).slice(0, 3)) {
+    const strict = await deezer.searchTracks(`artist:"${artist}" track:"${title}"`, 8).catch(() => []);
+    const hit = pick({ ...sp, artist }, strict);
+    if (hit) return hit;
+  }
   const loose = await deezer.searchTracks(`${sp.artist} ${sp.title.replace(/\s+-\s+.*$/, '')}`, 10).catch(() => []);
   return pick(sp, loose);
 }

@@ -15,15 +15,22 @@ function throttle() {
 }
 
 async function dz(path) {
-  await throttle();
-  const res = await fetch(API + path, { signal: AbortSignal.timeout(8000) });
-  if (!res.ok) throw new HttpError(502, `Deezer ${res.status}`);
-  const json = await res.json();
-  if (json.error) {
-    const status = json.error.code === 800 ? 404 : 502;
-    throw new HttpError(status, `Deezer: ${json.error.message}`);
+  for (let attempt = 0; ; attempt++) {
+    await throttle();
+    const res = await fetch(API + path, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) throw new HttpError(502, `Deezer ${res.status}`);
+    const json = await res.json();
+    // Code 4 = Anfragelimit erreicht → kurz warten statt "nicht gefunden" zu melden
+    if (json.error?.code === 4 && attempt < 3) {
+      await new Promise((r) => setTimeout(r, 5500));
+      continue;
+    }
+    if (json.error) {
+      const status = json.error.code === 800 ? 404 : 502;
+      throw new HttpError(status, `Deezer: ${json.error.message}`);
+    }
+    return json;
   }
-  return json;
 }
 
 const cached = (path, ttl) => cache.wrap(path, () => dz(path), ttl);

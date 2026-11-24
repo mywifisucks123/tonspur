@@ -159,3 +159,12 @@ export async function downloadAudio(url, outBase) {
     180000,
   );
 }
+
+/** Audio eines Videos direkt mit yt-dlp in genau diese Datei laden (ohne Umwandlung). */
+export async function downloadVideoAudio(videoId, outFile) {
+  await run(
+    ['-f', FORMAT, '--no-playlist', '--no-warnings', '--no-progress', '--no-part', '--force-overwrites',
+      '-o', outFile, `https://www.youtube.com/watch?v=${videoId}`],
+    300000,
+  );
+}

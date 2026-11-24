@@ -90,7 +90,7 @@ export async function prefetch(id, { file = false } = {}) {
   if (await local(track)) return;
   if (!(await yt.version())) return;
   const src = await youtube(track).catch(() => null);
-  if (src && file) await youtubeFile(id, src).catch(() => {});
+  if (src && file) await youtubeFile(id, src, track).catch(() => {});
 }
 
 // --- YouTube-Audio als normale Datei ---------------------------------------
@@ -101,7 +101,7 @@ export async function prefetch(id, { file = false } = {}) {
 const YT_DIR = path.join(config.cacheDir, 'yt');
 const filePending = new Map();
 
-export async function youtubeFile(id, src) {
+export async function youtubeFile(id, src, track = src?.track) {
   const file = path.join(YT_DIR, `${id}.m4a`);
   if (await exists(file)) {
     touch(file);
@@ -118,12 +118,16 @@ export async function youtubeFile(id, src) {
         try {
           await downloadChunked(src.url, src.headers, tmp);
         } catch (err) {
-          if (err.status !== 403 && err.status !== 410) throw err;
-          // Adresse abgelaufen → einmal neu holen
-          invalidateYoutube(id);
-          const fresh = await resolve(id);
-          if (fresh.type !== 'youtube') throw err;
-          await downloadChunked(fresh.url, fresh.headers, tmp);
+          log('yt-dlp', `Download ${id}: ${err.message} – versuche es anders`);
+          let done = false;
+          // Adresse abgelaufen oder gesperrt → einmal frisch auflösen
+          if ((err.status === 403 || err.status === 410) && track) {
+            invalidateYoutube(id);
+            const fresh = await youtube(track, { urgent: true }).catch(() => null);
+            if (fresh) done = await downloadChunked(fresh.url, fresh.headers, tmp).then(() => true, () => false);
+          }
+          // Letzter Weg: yt-dlp lädt die Datei selbst (kommt mit allen YouTube-Eigenheiten klar)
+          if (!done) await yt.downloadVideoAudio(src.videoId, tmp);
         }
         await ffmpeg(['-y', '-loglevel', 'error', '-i', tmp, '-map', '0:a:0', '-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', out]);
         await fs.rename(out, file);
@@ -181,7 +185,7 @@ export async function saveYoutubeToLibrary(track) {
   if (!(await yt.version())) throw new Error('yt-dlp nicht verfügbar');
   if (!(await ffmpegVersion())) throw new Error('ffmpeg nicht installiert');
   const src = await youtube(track, { urgent: false });
-  const file = await youtubeFile(track.id, src);
+  const file = await youtubeFile(track.id, src, track);
   const album = track.album || track.title;
   const dest = path.join(config.musicDir, safeName(track.artist), safeName(album), `${safeName(track.title)}.m4a`);
   const tags = { title: track.title, artist: track.artist, album_artist: track.artist, album, comment: 'YouTube' };
