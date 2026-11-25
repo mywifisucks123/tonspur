@@ -204,6 +204,21 @@ document.addEventListener('click', (e) => {
       .finally(() => (syncToggle.disabled = false));
     return;
   }
+  const syncMode = t.closest('[data-sync-mode]');
+  if (syncMode) {
+    if (syncMode.classList.contains('on')) return;
+    const mode = syncMode.dataset.syncMode;
+    syncMode.parentElement.querySelectorAll('button').forEach((b) => (b.disabled = true));
+    api
+      .setSyncMode(syncMode.dataset.id, mode)
+      .then(() => {
+        toast(mode === 'keep' ? 'Alte Songs bleiben ab jetzt in der Playlist' : 'Playlist folgt jetzt exakt Spotify');
+        rerender();
+      })
+      .catch((err) => toast(`Fehler: ${err.message}`))
+      .finally(() => syncMode.parentElement?.querySelectorAll('button').forEach((b) => (b.disabled = false)));
+    return;
+  }
   const syncRun = t.closest('[data-sync-run]');
   if (syncRun) {
     syncRun.disabled = true;

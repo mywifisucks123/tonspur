@@ -28,6 +28,13 @@ Für den Alltag auf dem iPhone brauchst du die Tonspur-Web-App nicht. Stabiler i
    ```
    Nach `pm2 restart tonspur` bzw. `docker compose … up -d` legt der Dienst die Playlists innerhalb einer Minute an.
 
+**Modus pro Playlist** (Schalter auf der Playlist-Seite):
+
+- „Wie bei Spotify": exakte Kopie, bei Spotify entfernte Songs fliegen auch in Jellyfin raus. Gut für Charts.
+- „Songs behalten": neue Songs kommen dazu, entfernte bleiben stehen (hinten angehängt). Gut für „meine Musik".
+
+In der `.env` schaltet ein angehängtes `|behalten` den zweiten Modus beim ersten Anlegen ein: `…/playlist/AAA|behalten`. Die Dateien selbst löscht Tonspur in keinem Modus.
+
 Die Playlists gehören dem Jellyfin-Benutzer, mit dem Tonspur arbeitet (erster Admin oder `JELLYFIN_USER_ID`), und sind als öffentlich markiert. Melde dich in Finamp mit diesem Benutzer an.
 
 Ohne Spotify-Zugangsdaten liest Tonspur höchstens etwa 100 Titel pro Playlist (siehe „Spotify-Playlists übernehmen").

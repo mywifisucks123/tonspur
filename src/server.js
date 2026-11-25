@@ -67,7 +67,12 @@ api.get('/imports', (_req, res) => res.json(imports.list()));
 
 api.get('/sync', (_req, res) => res.json(sync.status()));
 api.get('/sync/:id', (req, res) => res.json(sync.get(req.params.id)));
-api.post('/sync/:id', async (req, res) => res.json(await sync.setEnabled(req.params.id, Boolean(req.body?.enabled))));
+api.post('/sync/:id', async (req, res) => {
+  const { enabled, mode } = req.body ?? {};
+  if (mode !== undefined) await sync.setMode(req.params.id, mode);
+  if (enabled !== undefined) await sync.setEnabled(req.params.id, Boolean(enabled));
+  res.json(sync.get(req.params.id));
+});
 api.post('/sync/:id/run', async (req, res) => {
   if (!sync.get(req.params.id).enabled) throw new HttpError(400, 'Sync ist für diese Playlist aus');
   res.json(await sync.refresh(req.params.id));

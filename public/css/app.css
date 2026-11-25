@@ -241,6 +241,11 @@ svg { display: block; }
 .sync-sub { color: var(--text-2); font-size: 13px; margin-top: 3px; line-height: 1.35; }
 .sync-box .btn { flex: none; background: var(--surface-2); }
 .sync-run { margin-top: 10px; }
+.sync-mode { margin-top: 12px; }
+.sync-mode button { flex: 1; padding: 8px 10px; }
+.sync-box .sync-mode button { background: var(--surface-2); }
+.sync-box .sync-mode button.on { background: var(--text); color: var(--bg); }
+.sync-hint { color: var(--text-2); font-size: 12px; margin-top: 8px; line-height: 1.35; }
 .footnote details { margin-top: 6px; }
 .footnote summary { color: var(--accent); cursor: pointer; padding: 4px 0; }
 .footnote details div { padding: 3px 0; border-bottom: 0.5px solid var(--sep); }

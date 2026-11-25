@@ -437,7 +437,20 @@ export async function playlistView(id, source = 'dz') {
           </div>
           <button class="btn small" data-sync-toggle="${esc(p.id)}" data-on="${syncState.enabled ? '1' : ''}">${syncState.enabled ? 'Sync beenden' : 'Synchronisieren'}</button>
         </div>
-        ${syncState.enabled ? `<button class="btn small sync-run" data-sync-run="${esc(p.id)}">Jetzt abgleichen</button>` : ''}
+        ${
+          syncState.enabled
+            ? `<div class="sync-mode segmented">
+                <button class="${syncState.mode !== 'keep' ? 'on' : ''}" data-sync-mode="mirror" data-id="${esc(p.id)}">Wie bei Spotify</button>
+                <button class="${syncState.mode === 'keep' ? 'on' : ''}" data-sync-mode="keep" data-id="${esc(p.id)}">Songs behalten</button>
+              </div>
+              <div class="sync-hint">${
+                syncState.mode === 'keep'
+                  ? 'Neue Songs kommen dazu, bei Spotify entfernte bleiben in Jellyfin (hinten angehängt).'
+                  : 'Exakte Kopie: bei Spotify entfernte Songs fliegen auch in Jellyfin raus. Gut für Charts.'
+              }</div>
+              <button class="btn small sync-run" data-sync-run="${esc(p.id)}">Jetzt abgleichen</button>`
+            : ''
+        }
       </div>`
     : '';
 
@@ -485,8 +498,10 @@ function syncText(s) {
   if (!s.result) return 'Wird eingerichtet … die ersten Titel erscheinen, sobald sie geladen sind.';
   const { total, inLibrary, pending } = s.result;
   const when = s.lastBuild || s.lastRefresh;
+  const removed = s.mode === 'keep' ? Math.max(0, total - (s.result.current ?? total)) : 0;
   return [
     `${inLibrary} von ${total} Titeln in Jellyfin`,
+    removed ? `${removed} davon nicht mehr bei Spotify` : null,
     pending ? `${pending} werden noch geladen` : null,
     when ? `Stand ${new Date(when).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}` : null,
   ]

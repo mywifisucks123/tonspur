@@ -58,6 +58,7 @@ export const api = {
   removeImport: (id) => request(`/imports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   syncStatus: (id) => request(id ? `/sync/${encodeURIComponent(id)}` : '/sync'),
   setSync: (id, enabled) => request(`/sync/${encodeURIComponent(id)}`, { method: 'POST', body: { enabled } }),
+  setSyncMode: (id, mode) => request(`/sync/${encodeURIComponent(id)}`, { method: 'POST', body: { mode } }),
   runSync: (id) => request(`/sync/${encodeURIComponent(id)}/run`, { method: 'POST' }),
   health: () => request('/health'),
 };
