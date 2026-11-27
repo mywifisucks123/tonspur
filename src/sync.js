@@ -10,9 +10,11 @@
 // Jellyfin-Scan – so wächst die Playlist mit, während Downloads fertig werden.
 import path from 'node:path';
 import { config } from './config.js';
+import * as cleanup from './cleanup.js';
 import * as downloads from './downloads.js';
 import * as imports from './imports.js';
 import * as jellyfin from './jellyfin.js';
+import * as notify from './notify.js';
 import * as spotify from './spotify.js';
 import { HttpError, debounce, log, readJson, writeJson } from './util.js';
 
@@ -35,9 +37,9 @@ export async function init() {
       log('sync', `Kein Spotify-Link: ${link}`);
       continue;
     }
-    const id = `sp-${ref.type}-${ref.id}`;
+    const id = spotify.importId(ref);
     if (!state[id]) state[id] = { enabled: true, mode: /^(behalten|keep)$/i.test(flag ?? '') ? 'keep' : 'mirror' };
-    state[id].link = `https://open.spotify.com/${ref.type}/${ref.id}`;
+    state[id].link = spotify.canonicalLink(ref);
   }
   await save();
 
@@ -52,7 +54,7 @@ export function status() {
     try {
       title = imports.get(id).title;
     } catch {}
-    const { history, ...rest } = s;
+    const { history, lastIds, lastNames, settled, ...rest } = s;
     return { id, title, mode: 'mirror', ...rest, kept: history?.length ?? 0 };
   });
 }
@@ -60,7 +62,7 @@ export function status() {
 export function get(id) {
   const s = state[id] ?? { enabled: false };
   // Den Verlauf braucht die Oberfläche nicht, nur seine Größe
-  const { history, ...rest } = s;
+  const { history, lastIds, lastNames, settled, ...rest } = s;
   return { mode: 'mirror', ...rest, kept: history?.length ?? 0 };
 }
 
@@ -81,6 +83,19 @@ export async function setMode(id, mode) {
   return get(id);
 }
 
+/** Spotify-Link direkt synchronisieren (ohne vorherigen Import, z. B. Lieblingssongs). Läuft im Hintergrund. */
+export async function addLink(link, mode) {
+  const ref = spotify.parseLink(link);
+  if (!ref) throw new HttpError(400, 'Kein Spotify-Link');
+  const id = spotify.importId(ref);
+  const s = state[id] ?? {};
+  state[id] = { ...s, mode: mode ?? s.mode ?? 'mirror', enabled: true, link: spotify.canonicalLink(ref) };
+  if (state[id].mode === 'mirror') delete state[id].history;
+  await save();
+  refresh(id).catch(() => {});
+  return { id, ...get(id) };
+}
+
 export async function setEnabled(id, enabled) {
   const imp = imports.get(id); // wirft 404, wenn es den Import nicht gibt
   state[id] = { mode: 'mirror', ...(state[id] ?? {}), enabled, link: imp.link };
@@ -97,7 +112,18 @@ export async function refresh(id) {
   try {
     let link = s.link;
     if (!link) link = imports.get(id).link;
-    const playlist = await imports.save(await spotify.importLink(link));
+    let prev = null;
+    try {
+      prev = imports.get(id);
+    } catch {}
+    const fresh = await spotify.importLink(link);
+    // Ohne API (Premium abgelaufen) liefert Spotify nur die ersten ~100 Titel – eine größere
+    // Playlist soll dadurch nicht schrumpfen
+    const size = (p) => p.tracks.length + (p.missingTracks?.length ?? 0);
+    if (prev?.complete && !fresh.complete && size(fresh) < size(prev)) {
+      throw new Error(`Spotify liefert gerade nur ${size(fresh)} von ${size(prev)} Titeln (Zugriff gesperrt?)`);
+    }
+    const playlist = await imports.save(fresh);
     s.lastRefresh = Date.now();
 
     // Deezer-Titel über Deemix (mit YouTube-Rückfall), der Rest direkt über YouTube
@@ -115,6 +141,11 @@ export async function refresh(id) {
   } catch (err) {
     s.error = err.message;
     log('sync', `${id}: ${err.message}`);
+    let title = id;
+    try {
+      title = imports.get(id).title;
+    } catch {}
+    notify.quiet(`Sync-Fehler: ${title}`, `${err.message}\nDie Playlist bleibt auf dem letzten Stand.`, { tags: ['warning'], dedupe: `sync:${id}:${err.message}` });
   } finally {
     running.delete(id);
     await save();
@@ -151,12 +182,30 @@ export async function build(id) {
   // Frisch nachsehen: "noch nicht da" darf nicht aus dem Zwischenspeicher kommen
   jellyfin.forgetMatches();
   const ids = [];
+  const names = new Map();
   let pending = 0;
   for (const t of wanted) {
     const hit = await jellyfin.findLocal(t).catch(() => null);
-    if (hit && !ids.includes(hit.id)) ids.push(hit.id);
-    else if (!hit) pending++;
+    if (hit && !ids.includes(hit.id)) {
+      ids.push(hit.id);
+      names.set(hit.id, `${hit.artist} – ${hit.title}`);
+    } else if (!hit) pending++;
   }
+  // Fürs Aufräumen: diese Songs stehen gerade in einer Tonspur-Playlist
+  cleanup.remember(ids.map((i) => ({ id: i, name: names.get(i) })));
+  // Neue Songs melden – erst, wenn die Playlist einmal komplett geladen war (sonst kommt
+  // beim Einrichten jede Ankunft einzeln als "neu")
+  // Über Künstler – Titel vergleichen: ein Qualitäts-Upgrade bekommt in Jellyfin eine neue ID
+  const now = ids.map((i) => names.get(i));
+  if (s.lastNames && s.settled) {
+    const before = new Set(s.lastNames);
+    notify.newSongs(playlist.title, now.filter((n) => !before.has(n)));
+  }
+  s.lastNames = now;
+  delete s.lastIds;
+  s.firstBuild ??= Date.now();
+  // Einzelne Titel lassen sich evtl. nie laden – nach 3 Stunden gilt die Playlist trotzdem als eingerichtet
+  if (!pending || Date.now() - s.firstBuild > 3 * 60 * 60 * 1000) s.settled = true;
 
   if (!ids.length && !s.jellyfinId) {
     s.result = { total: wanted.length, current: current.length, inLibrary: 0, pending };

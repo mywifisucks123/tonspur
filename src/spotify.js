@@ -3,11 +3,17 @@
 //
 // Ohne Zugangsdaten liest Tonspur die öffentliche Einbettungsseite (open.spotify.com/embed),
 // die funktioniert auch für Spotifys eigene Playlists, liefert aber höchstens ~100 Titel.
-// Mit SPOTIFY_CLIENT_ID/SECRET kommt die komplette Liste inkl. ISRC über die Web-API.
-import { createHash } from 'node:crypto';
+//
+// Mit eigener Spotify-App (SPOTIFY_CLIENT_ID/SECRET) und "Spotify verbinden" kommen außerdem
+// die Lieblingssongs und die eigenen Playlists komplett. Seit Februar 2026 gilt für solche Apps:
+// Der App-Besitzer braucht Premium (sonst antwortet die API nicht mehr), und Inhalte gibt es
+// nur für eigene bzw. gemeinsame Playlists. Alles andere läuft weiter über die Einbettungsseite.
+import { createHash, randomBytes } from 'node:crypto';
+import path from 'node:path';
 import { config } from './config.js';
 import * as deezer from './deezer.js';
-import { HttpError, log, norm } from './util.js';
+import * as notify from './notify.js';
+import { HttpError, log, norm, readJson, writeJson } from './util.js';
 
 // *_URL nur zum Testen gegen einen Mock
 const OPEN = (process.env.SPOTIFY_OPEN_URL || 'https://open.spotify.com').replace(/\/+$/, '');
@@ -16,19 +22,41 @@ const ACCOUNTS = (process.env.SPOTIFY_ACCOUNTS_URL || 'https://accounts.spotify.
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15';
 
-/** open.spotify.com/(intl-de/)playlist/ID?si=… oder spotify:playlist:ID */
+const AUTH_FILE = path.join(config.dataDir, 'spotify-auth.json');
+const MATCH_FILE = path.join(config.dataDir, 'spotify-matches.json');
+const SCOPES = 'user-library-read playlist-read-private playlist-read-collaborative';
+const LIKED_MAX = 5000;
+
+/** @type {null | {access: string, refresh: string, expires: number, user?: {id: string, name: string}, connectedAt: number, error?: string|null}} */
+let auth = null;
+let matchCache = {};
+
+export async function init() {
+  auth = await readJson(AUTH_FILE, null);
+  matchCache = await readJson(MATCH_FILE, {});
+}
+const saveAuth = () => writeJson(AUTH_FILE, auth).catch((err) => log('spotify', err.message));
+
+export const hasCredentials = () => Boolean(config.spotify.clientId && config.spotify.clientSecret);
+
+/** open.spotify.com/(intl-de/)playlist/ID?si=… oder spotify:playlist:ID; Lieblingssongs: open.spotify.com/collection/tracks */
 export function parseLink(input) {
+  if (/open\.spotify\.com\/(?:intl-[a-z-]+\/)?collection\/tracks|spotify:(?:user:[^:]+:)?collection(?::tracks)?$/.test(String(input).trim())) {
+    return { type: 'liked', id: 'me' };
+  }
   const m =
     /open\.spotify\.com\/(?:intl-[a-z-]+\/)?(?:embed\/)?(playlist|album)\/([A-Za-z0-9]{10,})/.exec(input) ||
     /spotify:(playlist|album):([A-Za-z0-9]{10,})/.exec(input);
   return m ? { type: m[1], id: m[2] } : null;
 }
 
+export const canonicalLink = (ref) =>
+  ref.type === 'liked' ? 'https://open.spotify.com/collection/tracks' : `https://open.spotify.com/${ref.type}/${ref.id}`;
+export const importId = (ref) => `sp-${ref.type}-${ref.id}`;
+
 // --- Web-API (optional) ----------------------------------------------------
 
-let token = null;
-async function apiToken() {
-  if (token && token.expires > Date.now() + 60000) return token.value;
+async function tokenRequest(params) {
   const { clientId, clientSecret } = config.spotify;
   const res = await fetch(`${ACCOUNTS}/api/token`, {
     method: 'POST',
@@ -36,51 +64,220 @@ async function apiToken() {
       Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
       'Content-Type': 'application/x-www-form-urlencoded',
     },
-    body: 'grant_type=client_credentials',
+    body: new URLSearchParams(params).toString(),
     signal: AbortSignal.timeout(8000),
   });
-  if (!res.ok) throw new HttpError(502, `Spotify-Login fehlgeschlagen (${res.status}) – Client-ID/Secret prüfen`);
-  const j = await res.json();
-  token = { value: j.access_token, expires: Date.now() + j.expires_in * 1000 };
-  return token.value;
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw Object.assign(new HttpError(502, `Spotify-Login: ${j.error_description ?? j.error ?? res.status}`), { code: j.error });
+  }
+  return j;
 }
 
-async function api(path) {
-  const res = await fetch(path.startsWith('http') ? path : API + path, {
-    headers: { Authorization: `Bearer ${await apiToken()}` },
-    signal: AbortSignal.timeout(10000),
+// App-Token (ohne Benutzer) – reicht nur für Alben; Playlists liefert Spotify damit nicht mehr
+let appToken = null;
+async function clientToken() {
+  if (appToken && appToken.expires > Date.now() + 60000) return appToken.value;
+  const j = await tokenRequest({ grant_type: 'client_credentials' });
+  appToken = { value: j.access_token, expires: Date.now() + j.expires_in * 1000 };
+  return appToken.value;
+}
+
+async function userToken() {
+  if (!auth?.refresh) return null;
+  if (auth.access && auth.expires > Date.now() + 60000) return auth.access;
+  try {
+    const j = await tokenRequest({ grant_type: 'refresh_token', refresh_token: auth.refresh });
+    Object.assign(auth, { access: j.access_token, expires: Date.now() + j.expires_in * 1000 });
+    if (j.refresh_token) auth.refresh = j.refresh_token;
+  } catch (err) {
+    if (err.code === 'invalid_grant') {
+      // Zugriff in Spotify widerrufen → neu verbinden nötig
+      auth = { ...auth, access: null, refresh: null, error: 'Verbindung von Spotify beendet – bitte neu verbinden' };
+      notify.quiet('Spotify getrennt', 'Tonspur hat keinen Zugriff mehr auf dein Spotify-Konto. In Tonspur unter Bibliothek → Spotify neu verbinden.', { tags: ['warning'], dedupe: 'spotify-auth', dedupeHours: 24 });
+    }
+    throw err;
+  } finally {
+    await saveAuth();
+  }
+  return auth.access;
+}
+
+async function api(pathOrUrl, { user = true, attempt = 0 } = {}) {
+  const token = (user && (await userToken())) || (await clientToken());
+  const res = await fetch(pathOrUrl.startsWith('http') ? pathOrUrl : API + pathOrUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(15000),
   });
-  if (!res.ok) throw new HttpError(res.status === 404 ? 404 : 502, `Spotify ${res.status}`);
+  if (res.status === 429 && attempt < 3) {
+    const wait = Math.min(30, Number(res.headers.get('retry-after')) || 5);
+    await new Promise((r) => setTimeout(r, wait * 1000));
+    return api(pathOrUrl, { user, attempt: attempt + 1 });
+  }
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}));
+    throw new HttpError(res.status === 404 ? 404 : 502, `Spotify ${res.status}${j.error?.message ? ` (${j.error.message})` : ''}`);
+  }
   return res.json();
 }
 
+/** 403 auf eigene Daten = App gesperrt, meist weil das Premium des App-Besitzers abgelaufen ist. */
+function apiBlocked(err) {
+  const blocked = /Spotify 403/.test(err.message);
+  if (blocked && auth) {
+    auth.error = 'Spotify verweigert den Zugriff (Premium abgelaufen?). Playlists bleiben auf dem letzten Stand.';
+    saveAuth();
+    notify.quiet('Spotify-Zugriff gesperrt', 'Spotify antwortet der Tonspur-App nicht mehr – meist ist das Premium abgelaufen. Lieblingssongs und eigene Playlists bleiben auf dem letzten Stand, öffentliche Playlists laufen weiter (max. ~100 Titel).', { tags: ['warning'], dedupe: 'spotify-403', dedupeHours: 72 });
+  }
+  return blocked;
+}
+
+const mapApiTrack = (t) => ({
+  title: t.name,
+  artist: t.artists?.[0]?.name ?? '',
+  artists: t.artists?.map((a) => a.name) ?? [],
+  duration: Math.round((t.duration_ms ?? 0) / 1000),
+  isrc: t.external_ids?.isrc ?? null,
+});
+
+async function pages(first, max, pick) {
+  const out = [];
+  let next = first;
+  while (next && out.length < max) {
+    const page = await api(next);
+    for (const it of page.items ?? []) {
+      const t = pick(it);
+      if (t?.name && t.type !== 'episode' && !t.is_local) out.push(t);
+    }
+    next = page.next;
+  }
+  return out.slice(0, max);
+}
+
 async function fromApi({ type, id }) {
-  const meta = await api(`/${type}s/${id}`);
-  const items = [];
-  if (type === 'playlist') {
-    let next = `/playlists/${id}/tracks?limit=100&fields=items(track(name,artists(name),duration_ms,external_ids(isrc))),next`;
-    while (next && items.length < 1000) {
+  if (type === 'album') {
+    const meta = await api(`/albums/${id}`, { user: false });
+    return {
+      title: meta.name,
+      owner: meta.artists?.map((a) => a.name).join(', ') ?? '',
+      cover: meta.images?.[0]?.url ?? null,
+      tracks: (meta.tracks?.items ?? []).map(mapApiTrack),
+      full: true,
+    };
+  }
+  const meta = await api(`/playlists/${id}`);
+  // Neuer Pfad /items (seit 2026), alte Apps kennen nur /tracks; Eintrag heißt "item" oder "track"
+  let items;
+  try {
+    items = await pages(`/playlists/${id}/items?limit=100`, 3000, (it) => it.item ?? it.track);
+  } catch (err) {
+    if (!/Spotify 404/.test(err.message)) throw err;
+    items = await pages(`/playlists/${id}/tracks?limit=100`, 3000, (it) => it.track);
+  }
+  const total = meta.items?.total ?? meta.tracks?.total ?? 0;
+  if (!items.length && total) throw new Error('Spotify gibt den Inhalt nicht heraus (fremde Playlist)');
+  return {
+    title: meta.name,
+    owner: meta.owner?.display_name ?? '',
+    cover: meta.images?.[0]?.url ?? null,
+    tracks: items.map(mapApiTrack),
+    full: true,
+  };
+}
+
+async function fromLiked() {
+  if (!auth?.refresh) throw new HttpError(400, 'Spotify ist nicht verbunden (Bibliothek → Spotify)');
+  try {
+    const items = await pages('/me/tracks?limit=50', LIKED_MAX, (it) => it.track ?? it.item);
+    auth.error = null;
+    return { title: 'Lieblingssongs (Spotify)', owner: auth.user?.name ?? '', cover: null, tracks: items.map(mapApiTrack), full: items.length < LIKED_MAX };
+  } catch (err) {
+    apiBlocked(err);
+    throw err;
+  }
+}
+
+// --- Spotify verbinden (OAuth) -----------------------------------------------
+
+const pendingLogins = new Map();
+
+/** Adresse der Spotify-Anmeldeseite. redirectUri muss genau so in der Spotify-App eingetragen sein. */
+export function authorizeUrl(redirectUri) {
+  if (!hasCredentials()) throw new HttpError(503, 'SPOTIFY_CLIENT_ID und SPOTIFY_CLIENT_SECRET fehlen in der .env');
+  for (const [k, v] of pendingLogins) if (Date.now() - v.at > 15 * 60 * 1000) pendingLogins.delete(k);
+  const state = randomBytes(12).toString('hex');
+  pendingLogins.set(state, { redirectUri, at: Date.now() });
+  const q = new URLSearchParams({
+    client_id: config.spotify.clientId,
+    response_type: 'code',
+    redirect_uri: redirectUri,
+    scope: SCOPES,
+    state,
+    show_dialog: 'true',
+  });
+  return `${ACCOUNTS}/authorize?${q}`;
+}
+
+export async function finishLogin(code, state) {
+  const p = pendingLogins.get(state);
+  pendingLogins.delete(state);
+  if (!p) throw new HttpError(400, 'Anmeldung abgelaufen – bitte noch einmal auf „Spotify verbinden“');
+  const j = await tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: p.redirectUri });
+  auth = { access: j.access_token, refresh: j.refresh_token, expires: Date.now() + j.expires_in * 1000, connectedAt: Date.now(), error: null };
+  try {
+    const me = await api('/me');
+    auth.user = { id: me.id, name: me.display_name || me.id };
+  } catch (err) {
+    auth.error = apiBlocked(err) ? auth.error : err.message;
+  }
+  await saveAuth();
+  log('spotify', `verbunden als ${auth.user?.name ?? '?'}`);
+  return auth.user;
+}
+
+export async function disconnect() {
+  auth = null;
+  await writeJson(AUTH_FILE, null);
+}
+
+export function account() {
+  return {
+    credentials: hasCredentials(),
+    connected: Boolean(auth?.refresh),
+    user: auth?.user ?? null,
+    connectedAt: auth?.connectedAt ?? null,
+    error: auth?.error ?? null,
+  };
+}
+
+/** Eigene und gefolgte Playlists. own = Inhalt kommt komplett über die API. */
+export async function myPlaylists() {
+  if (!auth?.refresh) throw new HttpError(400, 'Spotify ist nicht verbunden');
+  const out = [];
+  let next = '/me/playlists?limit=50';
+  try {
+    while (next && out.length < 500) {
       const page = await api(next);
-      for (const it of page.items ?? []) {
-        if (it.track?.name) items.push(it.track);
+      for (const p of page.items ?? []) {
+        if (!p?.id) continue;
+        out.push({
+          id: importId({ type: 'playlist', id: p.id }),
+          link: canonicalLink({ type: 'playlist', id: p.id }),
+          title: p.name,
+          owner: p.owner?.display_name ?? '',
+          own: p.owner?.id === auth.user?.id || Boolean(p.collaborative),
+          cover: p.images?.[0]?.url ?? null,
+          trackCount: p.items?.total ?? p.tracks?.total ?? null,
+        });
       }
       next = page.next;
     }
-  } else {
-    items.push(...(meta.tracks?.items ?? []));
+    auth.error = null;
+  } catch (err) {
+    apiBlocked(err);
+    throw err;
   }
-  return {
-    title: meta.name,
-    owner: meta.owner?.display_name ?? meta.artists?.map((a) => a.name).join(', ') ?? '',
-    cover: meta.images?.[0]?.url ?? null,
-    tracks: items.map((t) => ({
-      title: t.name,
-      artist: t.artists?.[0]?.name ?? '',
-      artists: t.artists?.map((a) => a.name) ?? [],
-      duration: Math.round((t.duration_ms ?? 0) / 1000),
-      isrc: t.external_ids?.isrc ?? null,
-    })),
-  };
+  return out;
 }
 
 // --- Einbettungsseite (ohne Zugangsdaten) ----------------------------------
@@ -198,12 +395,14 @@ async function match(sp) {
 
   let best = null;
   let bestScore = -Infinity;
+  let failures = 0;
   const seen = new Set();
   for (const [q, limit] of queries) {
     if (seen.has(q)) continue;
     seen.add(q);
     const results = await deezer.searchTracks(q, limit).catch((err) => {
       log('spotify', `Deezer-Suche "${q}": ${err.message}`);
+      failures++;
       return [];
     });
     for (const c of results) {
@@ -215,8 +414,28 @@ async function match(sp) {
     }
     if (bestScore >= SURE) break;
   }
-  return bestScore >= GOOD ? best : null;
+  if (bestScore >= GOOD) return best;
+  if (failures) throw new Error('Deezer-Suche fehlgeschlagen');
+  return null;
 }
+
+// Treffer merken: große Listen (Lieblingssongs) sonst bei jedem Abgleich komplett neu suchen.
+// "Nicht gefunden" gilt eine Woche, dann wird neu gesucht (Deezer ergänzt laufend Titel).
+const MISS_TTL = 7 * 24 * 60 * 60 * 1000;
+const matchKey = (sp) => `${norm(sp.artist)}|${norm(sp.title)}|${sp.isrc ?? sp.duration ?? ''}`;
+
+async function matchCached(sp) {
+  const k = matchKey(sp);
+  const c = matchCache[k];
+  if (c && (c.t || Date.now() - c.at < MISS_TTL)) return c.t;
+  const t = await match(sp);
+  matchCache[k] = { t, at: Date.now() };
+  return t;
+}
+
+/** Freie Suche nach einem Song bei Deezer (z. B. für das Qualitäts-Upgrade). */
+export const findOnDeezer = (track) => matchCached({ artists: [], isrc: null, ...track });
+export const saveMatches = () => writeJson(MATCH_FILE, matchCache).catch((err) => log('spotify', err.message));
 
 /** Spotify-Link → Playlist mit Deezer-Titeln (nicht gefundene separat). */
 export async function importLink(link) {
@@ -224,16 +443,19 @@ export async function importLink(link) {
   if (!ref) throw new HttpError(400, 'Das ist kein Spotify-Playlist- oder Album-Link');
 
   let data;
-  const hasApi = config.spotify.clientId && config.spotify.clientSecret;
-  if (hasApi) {
-    try {
-      data = await fromApi(ref);
-    } catch (err) {
-      // Spotifys eigene Playlists sperrt die API für Fremd-Apps → Einbettungsseite
-      log('spotify', `API: ${err.message} → Einbettungsseite`);
+  if (ref.type === 'liked') {
+    data = await fromLiked();
+  } else {
+    if (hasCredentials()) {
+      try {
+        data = await fromApi(ref);
+      } catch (err) {
+        // Fremde und Spotify-eigene Playlists gibt die API nicht heraus → Einbettungsseite
+        log('spotify', `API: ${err.message} → Einbettungsseite`);
+      }
     }
+    data ??= await fromEmbed(ref);
   }
-  data ??= await fromEmbed(ref);
 
   const started = Date.now();
   const matched = [];
@@ -246,7 +468,7 @@ export async function importLink(link) {
     Array.from({ length: 4 }, async () => {
       while (next < data.tracks.length) {
         const i = next++;
-        results[i] = await match(data.tracks[i]).catch(() => null);
+        results[i] = await matchCached(data.tracks[i]).catch(() => null);
       }
     }),
   );
@@ -257,13 +479,14 @@ export async function importLink(link) {
     const id = `sp-${createHash('sha1').update(norm(`${sp.artist}|${sp.title}`)).digest('hex').slice(0, 16)}`;
     missingTracks.push({ id, source: 'sp', title: sp.title, artist: sp.artist, album: '', duration: sp.duration, cover: null, position: i });
   });
+  saveMatches();
   log('spotify', `${data.title}: ${matched.length}/${data.tracks.length} bei Deezer gefunden (${((Date.now() - started) / 1000).toFixed(1)} s)`);
 
   return {
-    id: `sp-${ref.type}-${ref.id}`,
+    id: importId(ref),
     source: 'sp',
     kind: ref.type,
-    link: `https://open.spotify.com/${ref.type}/${ref.id}`,
+    link: canonicalLink(ref),
     title: data.title,
     owner: data.owner,
     cover: data.cover,
@@ -272,7 +495,7 @@ export async function importLink(link) {
     tracks: matched,
     missing,
     missingTracks,
-    complete: hasApi || data.tracks.length < 100,
+    complete: data.full ?? data.tracks.length < 100,
     importedAt: Date.now(),
   };
 }

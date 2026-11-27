@@ -75,4 +75,8 @@ export const config = {
   },
 
   autoDownloadOnPlay: bool('AUTO_DOWNLOAD_ON_PLAY', true),
+
+  // Startwerte; geändert wird in der App (data/settings.json)
+  ntfyUrl: str('NTFY_URL'),
+  cleanup: { days: int('CLEANUP_DAYS', 30) },
 };

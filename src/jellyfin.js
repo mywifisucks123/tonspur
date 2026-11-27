@@ -1,5 +1,7 @@
 // Jellyfin: Bibliothek durchsuchen, Songs streamen, Scan anstoßen.
+import path from 'node:path';
 import { config } from './config.js';
+import { exists } from './media.js';
 import { HttpError, TtlCache, log, norm } from './util.js';
 
 const { url: BASE, apiKey } = config.jellyfin;
@@ -243,6 +245,92 @@ export async function setPlaylistItems(id, ids) {
     });
   }
   return true;
+}
+
+// --- Bibliothek als Ganzes (Aufräumen, Qualitäts-Upgrade) --------------------
+
+/** Einträge mit Dateipfad, Bitrate und Nutzerdaten (Favorit, zuletzt gehört). */
+export async function itemsByIds(ids) {
+  const uid = await userId();
+  const out = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const res = await jf(`/Items?userId=${uid}&Ids=${ids.slice(i, i + 100).join(',')}&Fields=Path,MediaSources`, { timeout: 30000 });
+    out.push(...(res?.Items ?? []));
+  }
+  return out;
+}
+
+export async function audioItems() {
+  const uid = await userId();
+  const out = [];
+  for (let start = 0; ; start += 500) {
+    const res = await jf(
+      `/Items?userId=${uid}&Recursive=true&IncludeItemTypes=Audio&Fields=Path,MediaSources&SortBy=SortName&StartIndex=${start}&Limit=500`,
+      { timeout: 60000 },
+    );
+    out.push(...(res?.Items ?? []));
+    if (!res?.Items?.length || out.length >= (res.TotalRecordCount ?? 0)) break;
+  }
+  return out;
+}
+
+/** IDs aller Songs, die in irgendeiner Jellyfin-Playlist stehen (auch selbst angelegte in Finamp). */
+export async function allPlaylistItemIds() {
+  const uid = await userId();
+  const res = await jf(`/Items?userId=${uid}&Recursive=true&IncludeItemTypes=Playlist`);
+  const out = new Set();
+  for (const p of res?.Items ?? []) {
+    for (const e of await playlistEntries(p.Id)) out.add(e.itemId);
+  }
+  return out;
+}
+
+/** In Jellyfin/Finamp als Favorit markierte Songs und Alben. */
+export async function favorites() {
+  const uid = await userId();
+  const [tracks, albums] = await Promise.all([
+    jf(`/Items?userId=${uid}&Recursive=true&IncludeItemTypes=Audio&Filters=IsFavorite`),
+    jf(`/Items?userId=${uid}&Recursive=true&IncludeItemTypes=MusicAlbum&Filters=IsFavorite`),
+  ]);
+  return {
+    tracks: new Set((tracks?.Items ?? []).map((i) => i.Id)),
+    albums: new Set((albums?.Items ?? []).map((i) => i.Id)),
+  };
+}
+
+/** Bitrate in bit/s und Codec eines Eintrags (aus MediaSources). */
+export function audioInfo(item) {
+  const src = item.MediaSources?.[0];
+  const stream = src?.MediaStreams?.find((m) => m.Type === 'Audio');
+  return {
+    bitrate: stream?.BitRate ?? src?.Bitrate ?? null,
+    codec: String(stream?.Codec ?? src?.Container ?? '').toLowerCase(),
+  };
+}
+
+// Jellyfin sieht die Musik unter einem anderen Pfad als Tonspur (/media/music vs. /music).
+// Den gemeinsamen Teil finden: hinten anfangen, bis die Datei bei uns existiert.
+let prefix = null;
+export async function localPath(jfPath) {
+  if (!jfPath) return null;
+  const inside = (p) => {
+    const rel = path.relative(config.musicDir, p);
+    return rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
+  if (prefix && jfPath.startsWith(prefix)) {
+    const p = path.join(config.musicDir, jfPath.slice(prefix.length));
+    if (inside(p) && (await exists(p))) return p;
+  }
+  const parts = jfPath.split(/[\\/]+/).filter(Boolean);
+  // mindestens Ordner + Datei, damit nicht zufällig eine gleichnamige Datei passt
+  for (let i = 0; i <= parts.length - 2; i++) {
+    const p = path.join(config.musicDir, ...parts.slice(i));
+    if (inside(p) && (await exists(p))) {
+      prefix = `/${parts.slice(0, i).join('/')}${i ? '/' : ''}`;
+      return p;
+    }
+  }
+  return null;
 }
 
 export async function ping() {

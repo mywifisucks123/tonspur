@@ -1,6 +1,7 @@
 // Client für die Web-API des Deemix-Containers (deemix-gui / deemix-docker).
 // Deemix hält den Deezer-Login pro HTTP-Session, deshalb merken wir uns das Cookie.
 import { config } from './config.js';
+import * as notify from './notify.js';
 import { HttpError, log } from './util.js';
 
 const { url: BASE } = config.deemix;
@@ -57,6 +58,7 @@ async function doLogin() {
   const status = typeof res === 'object' ? res?.status : Number(res);
   if (![1, 2, 3].includes(Number(status))) {
     loggedIn = false;
+    notify.quiet('Deezer-Login fehlgeschlagen', 'Deemix kann sich nicht bei Deezer anmelden – die ARL ist vermutlich abgelaufen. Neue ARL aus dem Browser-Cookie in die .env eintragen und Tonspur neu starten. Bis dahin lädt Tonspur über YouTube.', { tags: ['warning'], dedupe: 'deemix-login', dedupeHours: 24 });
     throw new HttpError(502, `Deemix-Login fehlgeschlagen (Status ${status}) – ARL abgelaufen?`);
   }
   loggedIn = true;
@@ -104,8 +106,9 @@ async function add(link, bitrate) {
  * Legt Track oder Album in die Deemix-Warteschlange.
  * Liefert die Deemix-UUIDs zurück (Format: `${type}_${id}_${bitrate}`).
  */
-export async function addToQueue(type, id) {
+export async function addToQueue(type, id, { minBitrate = 0 } = {}) {
   const link = `https://www.deezer.com/${type}/${id}`;
+  if (effectiveBitrate < minBitrate) throw new HttpError(409, `Deemix lädt gerade nur ${BITRATE_NAMES[effectiveBitrate]}`);
   for (;;) {
     const bitrate = effectiveBitrate;
     const res = await add(link, bitrate);
@@ -113,11 +116,12 @@ export async function addToQueue(type, id) {
     if (res?.result === false) {
       if (res.errid === 'AlreadyInQueue') return [fallbackUuid];
       const lower = LADDER.find((b) => b < bitrate);
-      if (res.errid === 'CantStream' && lower) {
+      if (res.errid === 'CantStream' && lower && lower >= minBitrate) {
         log('deemix', `Konto darf ${BITRATE_NAMES[bitrate]} nicht laden → ${BITRATE_NAMES[lower]}`);
         effectiveBitrate = lower;
         continue;
       }
+      if (res.errid === 'CantStream' && minBitrate) throw new HttpError(502, `Deemix: in ${BITRATE_NAMES[bitrate]} nicht verfügbar`);
       throw new HttpError(502, `Deemix: ${res.errid ?? 'addToQueue fehlgeschlagen'}`);
     }
     const objs = [res?.data?.obj ?? res?.obj].flat().filter(Boolean);

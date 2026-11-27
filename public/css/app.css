@@ -247,6 +247,58 @@ svg { display: block; }
 .sync-box .sync-mode button.on { background: var(--text); color: var(--bg); }
 .sync-hint { color: var(--text-2); font-size: 12px; margin-top: 8px; line-height: 1.35; }
 .footnote details { margin-top: 6px; }
+
+/* ---------- Panels (Spotify, Aufräumen, Qualität, Push) ---------- */
+.panel {
+  margin: 12px var(--gutter) 0;
+  padding: 14px;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 0.5px solid var(--sep);
+  font-size: 14px;
+  line-height: 1.4;
+}
+.panel p { margin: 8px 0 0; color: var(--text-2); }
+.panel-head { display: flex; align-items: flex-start; gap: 12px; }
+.panel-head > div { flex: 1; min-width: 0; }
+.panel-title { font-weight: 600; font-size: 15px; }
+.panel-sub { color: var(--text-2); font-size: 13px; margin-top: 6px; }
+.panel .btn { background: var(--surface-2); margin-top: 10px; display: inline-flex; text-decoration: none; }
+.panel .btn.primary { background: #1db954; color: #000; display: inline-flex; }
+.panel details { margin-top: 8px; font-size: 13px; }
+.panel summary { color: var(--accent); cursor: pointer; padding: 4px 0; }
+.panel details div { padding: 4px 0; border-bottom: 0.5px solid var(--sep); }
+.panel .warn, .lib-body .warn { color: #ff9f0a; font-size: 13px; padding: 0 var(--gutter); }
+.panel .warn { padding: 0; }
+.muted { color: var(--text-3); }
+.steps { margin: 10px 0 0; padding-left: 20px; color: var(--text-2); font-size: 13px; }
+.steps li { margin-bottom: 6px; }
+.steps b { color: var(--text); }
+.steps code, .panel code { font-size: 12px; background: var(--surface-2); padding: 2px 5px; border-radius: 6px; }
+.steps code.copy { display: block; margin-top: 4px; padding: 8px; word-break: break-all; color: var(--text); cursor: pointer; }
+.row-inline { display: flex; align-items: center; gap: 10px; margin-top: 10px; color: var(--text-2); font-size: 13px; }
+.row-inline input, .row-inline select {
+  flex: 1; min-width: 0; background: var(--surface-2); color: var(--text); border: 0; border-radius: 10px;
+  padding: 9px 10px; font: inherit; font-size: 14px;
+}
+.row-inline select { flex: none; }
+.row-buttons { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.switch { position: relative; width: 51px; height: 31px; flex: none; }
+.switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+.switch span { position: absolute; inset: 0; background: var(--surface-3); border-radius: 999px; transition: background 0.2s; cursor: pointer; }
+.switch span::after { content: ""; position: absolute; width: 27px; height: 27px; left: 2px; top: 2px; border-radius: 50%; background: #fff; transition: transform 0.2s; }
+.switch input:checked + span { background: var(--ok); }
+.switch input:checked + span::after { transform: translateX(20px); }
+.sp-list { margin-top: 8px; }
+.sp-row { display: flex; align-items: center; gap: 12px; padding: 8px var(--gutter); }
+.sp-row img, .sp-ph { width: 52px; height: 52px; border-radius: 6px; object-fit: cover; flex: none; }
+.sp-ph { display: grid; place-items: center; background: linear-gradient(135deg, #450af5, #c4efd9); color: #fff; }
+.sp-ph svg { width: 22px; height: 22px; }
+.sp-meta { flex: 1; min-width: 0; color: inherit; text-decoration: none; }
+.sp-title { font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sp-sub { color: var(--text-2); font-size: 13px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sp-row .btn { flex: none; background: var(--surface-2); }
+.sp-row .btn.on { color: var(--ok); }
 .footnote summary { color: var(--accent); cursor: pointer; padding: 4px 0; }
 .footnote details div { padding: 3px 0; border-bottom: 0.5px solid var(--sep); }
 .local-dot svg { width: 13px; height: 13px; color: var(--text-2); }

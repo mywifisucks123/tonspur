@@ -13,8 +13,10 @@ const FILE = path.join(config.dataDir, 'downloads.json');
 const POLL_MS = 3000;
 const STUCK_MS = 30 * 60 * 1000;
 const KEEP = 300;
+// Wie lange Jellyfin nach dem Scan-Start Zeit bekommt (*_MS-Variable nur zum Testen)
+const SCANNED_MS = Number(process.env.JELLYFIN_SCANNED_MS) || 60000;
 
-/** Meldet 'scanned', sobald Jellyfin nach neuen Downloads gescannt hat. */
+/** Meldet 'scanned', sobald Jellyfin nach neuen Downloads gescannt hat, und 'finished' pro Job. */
 export const events = new EventEmitter();
 
 /** @type {Map<string, any>} key `${type}:${id}` */
@@ -51,6 +53,8 @@ function update(job, patch) {
   persist();
 }
 
+export const get = (key) => jobs.get(key);
+
 export function list() {
   return [...jobs.values()].sort((a, b) => b.createdAt - a.createdAt);
 }
@@ -73,8 +77,9 @@ export function enqueue({ type, id, reason = 'manual', force = false, meta }) {
   return p;
 }
 
-async function createJob(key, type, id, reason, force) {
-  // (meta-Parameter wird hier nicht gebraucht – Deezer liefert die Angaben selbst)
+async function createJob(key, type, id, reason, force, opts) {
+  // opts.upgrade: Qualitäts-Upgrade – nur Deezer in mind. MP3 320, kein YouTube-Rückfall
+  const upgrade = Boolean(opts?.upgrade);
   const meta = type === 'track' ? await deezer.track(id) : await deezer.album(id);
   const job = {
     key,
@@ -88,6 +93,7 @@ async function createJob(key, type, id, reason, force) {
     progress: 0,
     uuids: [],
     error: null,
+    upgrade,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -103,14 +109,14 @@ async function createJob(key, type, id, reason, force) {
   }
 
   try {
-    const uuids = await deemix.addToQueue(type, id);
+    const uuids = await deemix.addToQueue(type, id, { minBitrate: upgrade ? 3 : 0 });
     update(job, { uuids });
     log('downloads', `${type} ${meta.artist} – ${meta.title} (${reason}) → Deemix`);
     startPolling();
   } catch (err) {
     log('downloads', `Fehler bei ${key}: ${err.message}`);
-    if (type === 'track') youtubeFallback(job, meta, err.message);
-    else update(job, { status: 'failed', error: err.message });
+    if (type === 'track' && !upgrade) youtubeFallback(job, meta, err.message);
+    else finish(job, 'failed', err.message);
   }
   return job;
 }
@@ -148,7 +154,9 @@ async function createYtJob(key, type, id, reason, force, meta) {
   };
   jobs.set(key, job);
   persist();
-  if (!force && (await resolver.isInYoutubeLibrary(id))) {
+  // Auch prüfen, ob der Song inzwischen anders in der Bibliothek liegt (z. B. per Upgrade von Deezer)
+  const local = force ? null : await jellyfin.findLocal({ ...meta, id: String(id) }).catch(() => null);
+  if (!force && (local || (await resolver.isInYoutubeLibrary(id)))) {
     update(job, { status: 'skipped', progress: 100, error: 'schon in der Bibliothek' });
     return job;
   }
@@ -236,7 +244,7 @@ async function poll() {
     const failed = states.every((s) => s.status === 'failed');
     const done = states.every((s) => ['completed', 'withErrors', 'failed'].includes(s.status));
     if (failed) {
-      if (job.type === 'track') {
+      if (job.type === 'track' && !job.upgrade) {
         update(job, { engine: 'yt' }); // sofort, damit die nächste Abfrage ihn nicht noch mal erwischt
         deezer
           .track(job.id)
@@ -262,6 +270,7 @@ function finish(job, status, error = null) {
   update(job, { status, progress: status === 'done' ? 100 : job.progress, error });
   log('downloads', `${job.artist} – ${job.title}: ${status}${error ? ` (${error})` : ''}`);
   if (status === 'done') scheduleScan();
+  events.emit('finished', job);
 }
 
 /** Mehrere Downloads kurz hintereinander → nur ein Scan. */
@@ -275,7 +284,7 @@ function scheduleScan() {
       setTimeout(() => {
         jellyfin.forgetMatches();
         events.emit('scanned');
-      }, 60000);
+      }, SCANNED_MS);
     } catch (err) {
       log('jellyfin', `Scan fehlgeschlagen: ${err.message}`);
     }

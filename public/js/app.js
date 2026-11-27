@@ -45,6 +45,7 @@ const routes = [
   [/^\/imported\/([\w-]+)$/, 'library', (m) => playlistView(m[1], 'sp')],
   [/^\/import\?u=(.+)$/, 'search', (m) => importView(decodeURIComponent(m[1]))],
   [/^\/library$/, 'library', () => libraryView()],
+  [/^\/library\/(\w+)(?:\?msg=(.*))?$/, 'library', (m) => libraryView(m[1], m[2] ? decodeURIComponent(m[2]) : null)],
   [/^\/jf-album\/(\w+)$/, 'library', (m) => jfAlbumView(m[1])],
 ];
 

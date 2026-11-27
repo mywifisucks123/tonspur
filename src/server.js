@@ -1,17 +1,21 @@
 import express from 'express';
 import path from 'node:path';
 import { config } from './config.js';
+import * as cleanup from './cleanup.js';
 import * as deemix from './deemix.js';
 import * as deezer from './deezer.js';
 import * as downloads from './downloads.js';
 import * as favorites from './favorites.js';
 import * as imports from './imports.js';
 import * as jellyfin from './jellyfin.js';
+import * as notify from './notify.js';
+import * as settings from './settings.js';
 import { proxy, proxyChunked } from './proxy.js';
 import * as resolver from './resolver.js';
 import * as soundcloud from './soundcloud.js';
 import * as spotify from './spotify.js';
 import * as sync from './sync.js';
+import * as upgrade from './upgrade.js';
 import { HttpError, log } from './util.js';
 import * as yt from './ytdlp.js';
 
@@ -75,8 +79,66 @@ api.post('/sync/:id', async (req, res) => {
 });
 api.post('/sync/:id/run', async (req, res) => {
   if (!sync.get(req.params.id).enabled) throw new HttpError(400, 'Sync ist für diese Playlist aus');
-  res.json(await sync.refresh(req.params.id));
+  await sync.refresh(req.params.id);
+  res.json(sync.get(req.params.id));
 });
+// Spotify-Link direkt synchronisieren (Lieblingssongs, eigene Playlists) – läuft im Hintergrund
+api.post('/sync-link', async (req, res) => {
+  const { url, mode } = req.body ?? {};
+  if (mode !== undefined && !['mirror', 'keep'].includes(mode)) throw new HttpError(400, 'mode muss mirror oder keep sein');
+  res.json(await sync.addLink(String(url ?? ''), mode));
+});
+
+// --- Spotify verbinden -----------------------------------------------------------
+
+api.get('/spotify/account', (_req, res) => res.json(spotify.account()));
+api.get('/spotify/login', (req, res) => {
+  // Die App schickt ihre eigene Adresse mit – so passt die Rückleitung auch hinter Tailscale
+  const redirect = String(req.query.redirect ?? '');
+  if (!/^https?:\/\/[^/]+\/api\/spotify\/callback$/.test(redirect)) throw new HttpError(400, 'Ungültige Rückleitungs-Adresse');
+  res.redirect(spotify.authorizeUrl(redirect));
+});
+api.get('/spotify/callback', async (req, res) => {
+  const back = (msg) => res.redirect(`/#/library/spotify${msg ? `?msg=${encodeURIComponent(msg)}` : ''}`);
+  if (req.query.error) return back(`Spotify: ${req.query.error === 'access_denied' ? 'abgebrochen' : req.query.error}`);
+  try {
+    const user = await spotify.finishLogin(String(req.query.code ?? ''), String(req.query.state ?? ''));
+    back(`Verbunden als ${user?.name ?? 'Spotify-Nutzer'}`);
+  } catch (err) {
+    back(err.message);
+  }
+});
+api.post('/spotify/logout', async (_req, res) => {
+  await spotify.disconnect();
+  res.json(spotify.account());
+});
+api.get('/spotify/playlists', async (_req, res) => {
+  const list = await spotify.myPlaylists();
+  const synced = new Map(sync.status().map((s) => [s.id, s]));
+  const imported = new Set(imports.list().map((i) => i.id));
+  res.json(list.map((p) => ({ ...p, sync: synced.get(p.id)?.enabled ?? false, imported: imported.has(p.id) })));
+});
+
+// --- Einstellungen, Aufräumen, Qualität, Push -----------------------------------
+
+api.get('/settings', (_req, res) => res.json(settings.get()));
+api.post('/settings', async (req, res) => res.json(await settings.update(req.body ?? {})));
+api.post('/notify/test', async (_req, res) => {
+  if (!settings.get().ntfy.url) throw new HttpError(400, 'Erst eine ntfy-Adresse eintragen');
+  await notify.send('Tonspur', 'Test – Push-Nachrichten kommen an.', { tags: ['white_check_mark'] }).catch((err) => {
+    throw new HttpError(502, `ntfy: ${err.message}`);
+  });
+  res.json({ ok: true });
+});
+api.get('/cleanup', async (_req, res) => res.json(await cleanup.status()));
+api.post('/cleanup/run', async (_req, res) => res.json(await cleanup.run({ manual: true })));
+api.get('/upgrade', async (_req, res) => res.json(await upgrade.status()));
+api.post('/upgrade', async (_req, res) => res.json(await upgrade.start()));
+api.post('/upgrade/reset', async (_req, res) => {
+  await upgrade.reset();
+  res.json({ ok: true });
+});
+
 api.get('/imports/:id', (req, res) => res.json(imports.get(req.params.id)));
 api.delete('/imports/:id', async (req, res) => {
   if (sync.get(req.params.id).enabled) await sync.setEnabled(req.params.id, false);
@@ -226,7 +288,13 @@ api.get('/health', async (_req, res) => {
       : { ok: false, error: config.yt.enabled ? 'nicht installiert' : 'deaktiviert' },
     ffmpeg: ff ? { ok: true, version: ff } : { ok: false, error: 'nicht installiert (brew install ffmpeg)' },
     soundcloud: sc,
-    spotify: { ok: true, mode: config.spotify.clientId ? 'Web-API' : 'Einbettung (max. ~100 Titel)' },
+    spotify: (() => {
+      const a = spotify.account();
+      if (a.connected && a.error) return { ok: false, error: a.error };
+      if (a.connected) return { ok: true, mode: `verbunden (${a.user?.name ?? '?'})` };
+      return { ok: true, mode: a.credentials ? 'App eingetragen, nicht verbunden' : 'Einbettung (max. ~100 Titel)' };
+    })(),
+    ntfy: { ok: Boolean(settings.get().ntfy.url), error: 'aus' },
     sync: { playlists: sync.status().filter((s) => s.enabled).length, intervalHours: config.sync.intervalHours },
     autoDownloadOnPlay: config.autoDownloadOnPlay,
   });
@@ -265,8 +333,9 @@ app.use((req, res, next) => {
   res.sendFile(path.join(config.publicDir, 'index.html'));
 });
 
-await Promise.all([favorites.init(), downloads.init(), resolver.init(), soundcloud.init(), imports.init()]);
-await sync.init();
+await settings.init();
+await Promise.all([favorites.init(), downloads.init(), resolver.init(), soundcloud.init(), imports.init(), spotify.init()]);
+await Promise.all([sync.init(), cleanup.init(), upgrade.init()]);
 
 app.listen(config.port, config.host, async () => {
   log('server', `läuft auf http://${config.host}:${config.port}`);

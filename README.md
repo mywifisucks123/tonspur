@@ -67,7 +67,25 @@ Voraussetzung: `brew install ffmpeg`.
 
 Spotify-Link einer Playlist oder eines Albums (Teilen → Link kopieren) in die Suche einfügen → „Übernehmen". Tonspur sucht jeden Titel bei Deezer (über ISRC, sonst Künstler + Titel + Dauer) und legt die Playlist unter Bibliothek → Playlists ab. Abgespielt und geladen wird dann ganz normal über Deezer/YouTube; Spotify selbst lässt sich nicht abspielen (DRM). „Neu abgleichen" holt den aktuellen Stand der Playlist.
 
-Ohne Zugangsdaten liest Tonspur die öffentliche Einbettungsseite von Spotify. Das klappt auch für Spotifys eigene Playlists (Today's Top Hits, RapCaviar …), liefert aber höchstens etwa 100 Titel. Für längere Playlists: auf developer.spotify.com eine App anlegen (Redirect-URI egal, z. B. `http://localhost`) und `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET` in die `.env` eintragen. Spotifys eigene Playlists sperrt die offizielle Schnittstelle für fremde Apps; dafür fällt Tonspur automatisch auf die Einbettungsseite zurück.
+Ohne Zugangsdaten liest Tonspur die öffentliche Einbettungsseite von Spotify. Das klappt auch für Spotifys eigene Playlists (Today's Top Hits, RapCaviar …), liefert aber höchstens etwa 100 Titel.
+
+### Spotify verbinden (Lieblingssongs, eigene Playlists ohne 100er-Grenze)
+
+Seit Februar 2026 gilt für selbst angelegte Spotify-Apps: Der Besitzer braucht **Spotify Premium** (läuft es aus, antwortet die API nicht mehr), und Inhalte gibt es nur für **eigene bzw. gemeinsame** Playlists und die Lieblingssongs. Fremde und Spotify-eigene Playlists laufen weiter über die Einbettungsseite.
+
+1. Tonspur über die HTTPS-Adresse öffnen (Tailscale, `https://…ts.net:8451`) → Bibliothek → Spotify. Dort steht die Redirect URI.
+2. developer.spotify.com → Dashboard → „Create app“: Name egal, Redirect URI von Schritt 1 eintragen, „Web API“ ankreuzen.
+3. Client ID und Secret als `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET` in die `.env`, Tonspur neu starten (`docker compose … up -d`).
+4. Bibliothek → Spotify → „Spotify verbinden“ (am besten im normalen Browser), danach bei Lieblingssongs und eigenen Playlists „Synchronisieren“.
+
+Läuft Premium aus, meldet Tonspur das (Status + Push) und lässt die Playlists auf dem letzten Stand – sie schrumpfen nicht auf 100 Titel. Mit Premium wieder an geht es automatisch weiter.
+
+## Aufräumen, Qualität, Push (Bibliothek → Status)
+
+- **Aufräumen** (Standard aus): löscht Songs, die über einen Spotify-Sync kamen und seit X Tagen (Standard 30) in keiner Jellyfin-Playlist mehr stehen. Geschützt: Favoriten in Finamp/Jellyfin oder Tonspur (Song oder Album), Songs in irgendeiner Playlist (auch selbst angelegten), in der Frist gehörte Songs, alles ohne Sync-Herkunft. Vorschau zeigt vorher, was weg würde. Läuft einmal täglich.
+- **Qualitäts-Upgrade**: findet Songs unter 320 kbps (YouTube-Rückfälle, SoundCloud, alte 128er), sucht sie bei Deezer und lädt sie in MP3 320 neu. Die alte Datei wird erst gelöscht, wenn die neue in Jellyfin angekommen ist; sonst kommt sie zurück. Geht nur, solange Deemix 320 laden darf (Deezer Premium).
+- **Push-Nachrichten** über die App „ntfy“: neue Songs in Sync-Playlists, Sync-Fehler, abgelaufene Deezer-ARL, gesperrter Spotify-Zugriff, Aufräumen, Upgrade fertig. Adresse in Tonspur eintragen, in der ntfy-App dasselbe Thema abonnieren.
+- **Songtexte**: Jellyfin-Plugin „LrcLib“ (Dashboard → Plugins → Katalog) installieren, Jellyfin neu starten. Finamp zeigt die Texte dann mitlaufend.
 
 ## Deezer-Qualität
 
@@ -185,6 +203,10 @@ tonspur/
 │   ├── spotify.js      Spotify-Import und Abgleich mit Deezer
 │   ├── imports.js      gespeicherte Spotify-Importe
 │   ├── sync.js         Spotify-Playlists → Jellyfin-Playlists
+│   ├── cleanup.js      Aufräumen nicht mehr gebrauchter Sync-Songs
+│   ├── upgrade.js      Songs unter 320 kbps von Deezer neu laden
+│   ├── notify.js       Push über ntfy
+│   ├── settings.js     in der App geänderte Einstellungen
 │   ├── media.js        ffmpeg, schneller Download, Tags/Cover, Zwischenspeicher
 │   ├── favorites.js    Favoriten als JSON
 │   └── util.js
@@ -211,6 +233,13 @@ tonspur/
 | GET/DELETE | `/api/imports`, `/api/imports/:id` | übernommene Spotify-Playlists |
 | GET/POST | `/api/sync`, `/api/sync/:id` `{enabled}` | Spotify → Jellyfin-Sync ein/aus, Status |
 | POST | `/api/sync/:id/run` | sofort abgleichen |
+| POST | `/api/sync-link` `{url, mode}` | Spotify-Link direkt synchronisieren (auch Lieblingssongs) |
+| GET | `/api/spotify/account`, `/api/spotify/playlists` | Spotify-Verbindung, eigene Playlists |
+| GET | `/api/spotify/login?redirect=`, `/api/spotify/callback` | Spotify verbinden (OAuth) |
+| GET/POST | `/api/settings` | Aufräumen, ntfy |
+| GET/POST | `/api/cleanup`, `/api/cleanup/run` | Vorschau / jetzt aufräumen |
+| GET/POST | `/api/upgrade`, `/api/upgrade/reset` | Qualitäts-Upgrade |
+| POST | `/api/notify/test` | Test-Push |
 | GET/DELETE | `/api/downloads` | Download-Status / erledigte ausblenden |
 | GET/POST/DELETE | `/api/favorites` | Favoriten |
 | GET | `/api/library/albums`, `/api/jf/album/:id` | Jellyfin-Bibliothek |

@@ -577,16 +577,19 @@ const LIB_TABS = [
   ['songs', 'Songs'],
   ['albums', 'Alben'],
   ['playlists', 'Playlists'],
+  ['spotify', 'Spotify'],
   ['local', 'Mac Mini'],
   ['downloads', 'Downloads'],
   ['status', 'Status'],
 ];
 
-export function libraryView() {
+export function libraryView(initialTab, message) {
   let tab = 'songs';
   try {
     tab = localStorage.getItem('tonspur:libtab') ?? 'songs';
   } catch {}
+  if (initialTab && LIB_TABS.some(([k]) => k === initialTab)) tab = initialTab;
+  if (message) setTimeout(() => toast(message), 300);
   let timer;
 
   const el = view(html`
@@ -616,6 +619,7 @@ export function libraryView() {
         const on = new Set(synced.filter((x) => x.enabled).map((x) => x.id));
         renderPlaylists(imported.map((p) => (on.has(p.id) ? { ...p, owner: [p.owner, 'Jellyfin-Sync'].filter(Boolean).join(' · ') } : p)));
       }
+      else if (tab === 'spotify') await renderSpotify();
       else if (tab === 'local') {
         body.innerHTML = skeleton(4);
         const albums = await api.libraryAlbums();
@@ -631,6 +635,7 @@ export function libraryView() {
         const h = await api.health();
         if (current !== tab) return;
         renderStatus(h);
+        renderExtras().catch(() => {});
       }
     } catch (err) {
       if (current === tab) body.innerHTML = errorBox(err);
@@ -714,6 +719,135 @@ export function libraryView() {
     <p class="footnote">Ohne yt-dlp spielt die Sofort-Wiedergabe nur 30-Sekunden-Vorschauen, bis der Song in Jellyfin liegt.</p>`;
   }
 
+  // --- Spotify-Konto: Lieblingssongs und eigene Playlists -----------------------
+  async function renderSpotify() {
+    body.innerHTML = skeleton(3);
+    const acc = await api.spotifyAccount();
+    if (tab !== 'spotify') return;
+    const redirect = `${location.origin}/api/spotify/callback`;
+    const secure = location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname);
+    const setup = html`<ol class="steps">
+        <li>Auf <b>developer.spotify.com</b> → Dashboard → „Create app“ (mit deinem Premium-Konto).</li>
+        <li>Als Redirect URI genau diese Adresse eintragen:<code class="copy" data-copy="${esc(redirect)}">${esc(redirect)}</code></li>
+        <li>Bei „Which API/SDKs“ <b>Web API</b> ankreuzen, speichern.</li>
+        <li>Client ID und Client Secret in die <code>.env</code> (SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET), Tonspur neu starten.</li>
+      </ol>
+      ${secure ? '' : '<p class="warn">Spotify akzeptiert nur HTTPS-Adressen. Öffne Tonspur über die Tailscale-Adresse (https://…ts.net), dann stimmt die Redirect URI.</p>'}`;
+
+    if (!acc.credentials) {
+      body.innerHTML = html`<div class="panel"><div class="panel-title">Spotify verbinden</div>
+        <p>Damit kommen deine <b>Lieblingssongs</b> und deine <b>eigenen Playlists</b> komplett (ohne 100-Titel-Grenze) nach Jellyfin. Fremde Playlists und Charts laufen wie bisher.</p>
+        ${setup}</div>`;
+      return;
+    }
+    if (!acc.connected) {
+      body.innerHTML = html`<div class="panel"><div class="panel-title">Spotify verbinden</div>
+        <p>Die Spotify-App ist eingetragen. Jetzt mit deinem Konto anmelden – am besten im normalen Browser (Safari/Mac), nicht in der Home-Bildschirm-App.</p>
+        <a class="btn primary" href="/api/spotify/login?redirect=${encodeURIComponent(redirect)}">Spotify verbinden</a>
+        ${acc.error ? `<p class="warn">${esc(acc.error)}</p>` : ''}
+        <details><summary>Redirect URI prüfen</summary>${setup}</details></div>`;
+      return;
+    }
+
+    let playlists = [];
+    let listError = null;
+    try {
+      playlists = await api.spotifyPlaylists();
+    } catch (err) {
+      listError = err.message;
+    }
+    const synced = await api.syncStatus().catch(() => []);
+    if (tab !== 'spotify') return;
+    const likedSync = synced.find((s) => s.id === 'sp-liked-me');
+    const btn = (p, on) =>
+      on
+        ? `<a class="btn small on" href="#/imported/${esc(p.id)}">Sync an</a>`
+        : `<button class="btn small" data-sp-sync="${esc(p.link)}">Synchronisieren</button>`;
+    const rowFor = (p) => html`<div class="sp-row">
+        ${p.cover ? `<img src="${esc(p.cover)}" alt="" loading="lazy">` : `<div class="sp-ph">${icons.heart}</div>`}
+        <a class="sp-meta" href="${p.imported ? `#/imported/${esc(p.id)}` : `#/import?u=${encodeURIComponent(p.link)}`}">
+          <div class="sp-title">${esc(p.title)}</div>
+          <div class="sp-sub">${esc([p.trackCount != null ? `${p.trackCount} Titel` : null, p.own ? null : `von ${p.owner} · max. ~100 Titel`].filter(Boolean).join(' · '))}</div>
+        </a>
+        ${btn(p, p.sync)}
+      </div>`;
+    body.innerHTML = html`<div class="panel">
+        <div class="panel-head"><div><div class="panel-title">Verbunden als ${esc(acc.user?.name ?? '?')}</div>
+          <div class="panel-sub">Lieblingssongs und eigene Playlists kommen komplett. Spotify verlangt dafür Premium beim App-Besitzer – läuft es aus, bleiben die Playlists auf dem letzten Stand.</div></div>
+          <button class="btn small" data-sp-logout>Trennen</button></div>
+        ${acc.error ? `<p class="warn">${esc(acc.error)}</p>` : ''}
+      </div>
+      <div class="sp-list">
+        ${rowFor({ id: 'sp-liked-me', link: 'https://open.spotify.com/collection/tracks', title: 'Lieblingssongs', own: true, trackCount: likedSync?.result?.current ?? null, imported: Boolean(likedSync?.result), sync: likedSync?.enabled })}
+        ${listError ? `<p class="warn">${esc(listError)}</p>` : playlists.map(rowFor).join('')}
+      </div>
+      <p class="footnote">„Synchronisieren“ legt die Playlist in Jellyfin an und lädt alle Songs. Ob alte Songs drin bleiben, stellst du auf der Playlist-Seite ein. Große Listen (Lieblingssongs) brauchen beim ersten Mal etwas.</p>`;
+  }
+
+  // --- Status: Aufräumen, Qualität, Push -------------------------------------
+  async function renderExtras() {
+    const box = document.createElement('div');
+    box.className = 'extras';
+    box.innerHTML = skeleton(2);
+    body.append(box);
+    const [st, clean, up] = await Promise.all([
+      api.settings(),
+      api.cleanup().catch((err) => ({ error: err.message })),
+      api.upgrade().catch((err) => ({ error: err.message })),
+    ]);
+    if (tab !== 'status') return;
+    const dateFmt = (t) => new Date(t).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+    const cleanPanel = clean.error
+      ? `<p class="warn">${esc(clean.error)}</p>`
+      : html`<div class="panel-head"><div><div class="panel-title">Aufräumen</div>
+          <div class="panel-sub">Löscht Songs, die über einen Spotify-Sync kamen und seit ${clean.days} Tagen in keiner Playlist mehr stehen – z. B. aus den Charts gefallen. Favoriten, Songs in eigenen Playlists und kürzlich gehörte bleiben.</div></div>
+          <label class="switch"><input type="checkbox" data-cleanup-toggle ${clean.enabled ? 'checked' : ''}><span></span></label></div>
+        <div class="row-inline">Frist
+          <select data-cleanup-days>${[14, 30, 60, 90, 180].map((d) => `<option value="${d}" ${d === clean.days ? 'selected' : ''}>${d} Tage</option>`).join('')}</select></div>
+        <div class="panel-sub">${clean.candidates.length ? `${clean.candidates.length} ${clean.candidates.length === 1 ? 'Song würde' : 'Songs würden'} ${clean.enabled ? 'beim nächsten Lauf' : 'jetzt'} gelöscht` : 'Gerade nichts zu löschen'}${clean.waiting ? ` · ${clean.waiting} warten (kürzlich aus Playlists gefallen)` : ''}${clean.lastRun ? ` · letzter Lauf ${dateFmt(clean.lastRun.at)}: ${clean.lastRun.deleted} gelöscht` : ''}</div>
+        ${clean.candidates.length ? `<details><summary>Anzeigen</summary>${clean.candidates.map((c) => `<div>${esc(c.name)} <span class="muted">seit ${dateFmt(c.since)}</span></div>`).join('')}</details>` : ''}
+        ${clean.enabled && clean.candidates.length ? '<button class="btn small" data-cleanup-run>Jetzt aufräumen</button>' : ''}`;
+    const c = up.counts ?? {};
+    const upPanel = up.error
+      ? `<p class="warn">${esc(up.error)}</p>`
+      : html`<div class="panel-title">Qualität</div>
+        <div class="panel-sub">${up.low ? `${up.low} ${up.low === 1 ? 'Song' : 'Songs'} unter 320 kbps (YouTube, SoundCloud, alte 128er).` : 'Alle Songs mindestens 320 kbps.'} Deemix lädt gerade: ${esc(up.quality?.name ?? '?')}.</div>
+        ${c.queued || c.done || c.failed || c.nomatch ? `<div class="panel-sub">Upgrade: ${c.done} fertig · ${c.queued} laufen · ${c.nomatch} nicht bei Deezer · ${c.failed} fehlgeschlagen</div>` : ''}
+        ${up.sample?.length ? `<details><summary>Anzeigen</summary>${up.sample.map((s) => `<div>${esc(s.name)} <span class="muted">${s.kbps} kbps</span></div>`).join('')}</details>` : ''}
+        <div class="row-buttons">
+          ${up.open && !up.running && up.quality?.bitrate >= 3 ? `<button class="btn small" data-upgrade-start>${up.open === 1 ? 'Song' : `${up.open} Songs`} auf 320 kbps bringen</button>` : ''}
+          ${up.running ? '<span class="muted">Upgrade läuft …</span>' : ''}
+          ${c.failed || c.nomatch ? '<button class="btn small" data-upgrade-reset>Fehlgeschlagene erneut versuchen</button>' : ''}
+        </div>
+        ${up.quality?.bitrate < 3 ? '<p class="warn">Upgrade geht nur mit Deezer Premium (Deemix muss MP3 320 laden).</p>' : ''}`;
+    const suggestion = `https://ntfy.sh/tonspur-${Math.random().toString(36).slice(2, 12)}`;
+    const ntfyPanel = html`<div class="panel-title">Push-Nachrichten</div>
+      <div class="panel-sub">Über die kostenlose App „ntfy“: neue Songs in Sync-Playlists, Fehler (z. B. Deezer-ARL abgelaufen), Aufräumen. In der App das Thema abonnieren – der Name ist wie ein Passwort, also nicht zu einfach.</div>
+      <div class="row-inline"><input type="url" data-ntfy-url placeholder="${esc(suggestion)}" value="${esc(st.ntfy.url)}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+      <div class="row-buttons">
+        <button class="btn small" data-ntfy-save>Speichern</button>
+        ${st.ntfy.url ? '<button class="btn small" data-ntfy-test>Test senden</button>' : `<button class="btn small" data-ntfy-suggest="${esc(suggestion)}">Vorschlag übernehmen</button>`}
+      </div>`;
+    box.innerHTML = html`<div class="panel">${cleanPanel}</div><div class="panel">${upPanel}</div><div class="panel">${ntfyPanel}</div>
+      <div class="panel"><div class="panel-title">Songtexte</div><div class="panel-sub">Mitlaufende Lyrics in Finamp kommen über das offizielle Jellyfin-Plugin „LrcLib“ (Dashboard → Plugins → Katalog). Tonspur muss dafür nichts tun.</div></div>`;
+  }
+
+  body.addEventListener('change', async (e) => {
+    const t = e.target;
+    try {
+      if (t.matches('[data-cleanup-toggle]')) {
+        await api.saveSettings({ cleanup: { enabled: t.checked } });
+        toast(t.checked ? 'Aufräumen an – läuft einmal am Tag' : 'Aufräumen aus');
+        render();
+      } else if (t.matches('[data-cleanup-days]')) {
+        await api.saveSettings({ cleanup: { days: Number(t.value) } });
+        render();
+      }
+    } catch (err) {
+      toast(`Fehler: ${err.message}`);
+    }
+  });
+
   seg.addEventListener('click', (e) => {
     const b = e.target.closest('button[data-tab]');
     if (!b || b.dataset.tab === tab) return;
@@ -731,6 +865,39 @@ export function libraryView() {
     if (e.target.closest('[data-action="clear-downloads"]')) {
       await api.clearDownloads();
       renderDownloads();
+    }
+    const t = e.target;
+    const act = async (el, fn, ok) => {
+      el.disabled = true;
+      try {
+        const r = await fn();
+        if (ok) toast(typeof ok === 'function' ? ok(r) : ok);
+        render();
+      } catch (err) {
+        toast(`Fehler: ${err.message}`);
+        el.disabled = false;
+      }
+    };
+    let el;
+    if ((el = t.closest('[data-sp-sync]'))) {
+      act(el, () => api.syncLink(el.dataset.spSync), 'Sync an – Songs werden geladen, die Playlist erscheint in Jellyfin');
+    } else if ((el = t.closest('[data-sp-logout]'))) {
+      if (confirm('Spotify trennen? Gesyncte Playlists bleiben auf dem letzten Stand.')) act(el, () => api.spotifyLogout(), 'Spotify getrennt');
+    } else if ((el = t.closest('[data-copy]'))) {
+      navigator.clipboard?.writeText(el.dataset.copy).then(() => toast('Kopiert'), () => {});
+    } else if ((el = t.closest('[data-cleanup-run]'))) {
+      if (confirm('Die angezeigten Songs jetzt endgültig löschen?')) act(el, () => api.runCleanup(), (r) => `${r.deleted.length} Songs gelöscht`);
+    } else if ((el = t.closest('[data-upgrade-start]'))) {
+      act(el, () => api.startUpgrade(), (r) => `${r.started} Songs werden gesucht und in 320 neu geladen – Fortschritt unter Downloads`);
+    } else if ((el = t.closest('[data-upgrade-reset]'))) {
+      act(el, () => api.resetUpgrade(), 'Zurückgesetzt');
+    } else if ((el = t.closest('[data-ntfy-suggest]'))) {
+      body.querySelector('[data-ntfy-url]').value = el.dataset.ntfySuggest;
+    } else if ((el = t.closest('[data-ntfy-save]'))) {
+      const url = body.querySelector('[data-ntfy-url]').value.trim();
+      act(el, () => api.saveSettings({ ntfy: { url } }), url ? 'Gespeichert – jetzt „Test senden“' : 'Push-Nachrichten aus');
+    } else if ((el = t.closest('[data-ntfy-test]'))) {
+      act(el, () => api.testNotify(), 'Test gesendet – kam die Nachricht an?');
     }
   });
 
