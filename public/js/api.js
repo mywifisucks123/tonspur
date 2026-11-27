@@ -71,6 +71,8 @@ export const api = {
   upgrade: () => request('/upgrade'),
   startUpgrade: () => request('/upgrade', { method: 'POST' }),
   resetUpgrade: () => request('/upgrade/reset', { method: 'POST' }),
+  lyrics: () => request('/lyrics'),
+  runLyrics: (retryNone) => request('/lyrics/run', { method: 'POST', body: { retryNone } }),
   runSync: (id) => request(`/sync/${encodeURIComponent(id)}/run`, { method: 'POST' }),
   health: () => request('/health'),
 };

@@ -790,10 +790,11 @@ export function libraryView(initialTab, message) {
     box.className = 'extras';
     box.innerHTML = skeleton(2);
     body.append(box);
-    const [st, clean, up] = await Promise.all([
+    const [st, clean, up, ly] = await Promise.all([
       api.settings(),
       api.cleanup().catch((err) => ({ error: err.message })),
       api.upgrade().catch((err) => ({ error: err.message })),
+      api.lyrics().catch((err) => ({ error: err.message })),
     ]);
     if (tab !== 'status') return;
     const dateFmt = (t) => new Date(t).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
@@ -829,7 +830,21 @@ export function libraryView(initialTab, message) {
         ${st.ntfy.url ? '<button class="btn small" data-ntfy-test>Test senden</button>' : `<button class="btn small" data-ntfy-suggest="${esc(suggestion)}">Vorschlag übernehmen</button>`}
       </div>`;
     box.innerHTML = html`<div class="panel">${cleanPanel}</div><div class="panel">${upPanel}</div><div class="panel">${ntfyPanel}</div>
-      <div class="panel"><div class="panel-title">Songtexte</div><div class="panel-sub">Mitlaufende Lyrics in Finamp kommen über das offizielle Jellyfin-Plugin „LrcLib“ (Dashboard → Plugins → Katalog). Tonspur muss dafür nichts tun.</div></div>`;
+      <div class="panel">${lyricsPanel(ly)}</div>`;
+  }
+
+  function lyricsPanel(ly) {
+    if (ly.error) return `<p class="warn">${esc(ly.error)}</p>`;
+    const c = ly.counts;
+    const p = ly.progress;
+    return html`<div class="panel-title">Songtexte</div>
+      <div class="panel-sub">Tonspur holt Songtexte von LRCLIB und legt sie neben die Musikdateien – Finamp zeigt sie mitlaufend. Neue Songs bekommen ihren Text automatisch.</div>
+      <div class="panel-sub">${c.synced} mitlaufend · ${c.plain} nur Text · ${c.had} hatten schon einen · ${c.none} nicht gefunden${c.instrumental ? ` · ${c.instrumental} instrumental` : ''}</div>
+      ${ly.running && p ? `<div class="panel-sub">Suche läuft: ${p.done} von ${p.total} (${p.found} gefunden) – etwa 1 Song pro Sekunde</div>` : ''}
+      <div class="row-buttons">
+        ${ly.running ? '' : '<button class="btn small" data-lyrics-run>Jetzt suchen</button>'}
+        ${!ly.running && c.none ? '<button class="btn small" data-lyrics-retry>Nicht gefundene erneut</button>' : ''}
+      </div>`;
   }
 
   body.addEventListener('change', async (e) => {
@@ -891,6 +906,10 @@ export function libraryView(initialTab, message) {
       act(el, () => api.startUpgrade(), (r) => `${r.started} Songs werden gesucht und in 320 neu geladen – Fortschritt unter Downloads`);
     } else if ((el = t.closest('[data-upgrade-reset]'))) {
       act(el, () => api.resetUpgrade(), 'Zurückgesetzt');
+    } else if ((el = t.closest('[data-lyrics-run]'))) {
+      act(el, () => api.runLyrics(false), 'Suche gestartet – läuft im Hintergrund');
+    } else if ((el = t.closest('[data-lyrics-retry]'))) {
+      act(el, () => api.runLyrics(true), 'Suche gestartet – läuft im Hintergrund');
     } else if ((el = t.closest('[data-ntfy-suggest]'))) {
       body.querySelector('[data-ntfy-url]').value = el.dataset.ntfySuggest;
     } else if ((el = t.closest('[data-ntfy-save]'))) {

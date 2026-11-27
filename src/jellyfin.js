@@ -173,6 +173,14 @@ export async function refreshLibrary() {
   log('jellyfin', 'Bibliothek-Scan gestartet');
 }
 
+/** Einzelnen Song neu einlesen, z. B. damit Jellyfin eine neue .lrc-Datei daneben findet. */
+export async function refreshItem(id) {
+  await jf(
+    `/Items/${encodeURIComponent(id)}/Refresh?MetadataRefreshMode=FullRefresh&ImageRefreshMode=None&ReplaceAllMetadata=false&ReplaceAllImages=false`,
+    { method: 'POST', timeout: 15000 },
+  );
+}
+
 // --- Playlists (erscheinen in jeder Jellyfin-App, z. B. Finamp) --------------
 
 export async function playlistExists(id) {

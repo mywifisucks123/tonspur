@@ -334,7 +334,7 @@ async function fromEmbed({ type, id }) {
 
 // Zusätze, die Spotify und Deezer unterschiedlich schreiben
 const NOISE = /\s*[([][^)\]]*\b(feat|ft|with|radio edit|edit|remaster(ed)?|version|mono|stereo|original mix|single|explicit|clean)\b[^)\]]*[)\]]|\s+-\s+.*$/gi;
-const cleanTitle = (t) => t.replace(NOISE, '').trim() || t;
+export const cleanTitle = (t) => t.replace(NOISE, '').trim() || t;
 const words = (t) => new Set(norm(t).split(' ').filter(Boolean));
 
 /** Titel-Ähnlichkeit 0–50 */

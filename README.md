@@ -85,7 +85,7 @@ Läuft Premium aus, meldet Tonspur das (Status + Push) und lässt die Playlists 
 - **Aufräumen** (Standard aus): löscht Songs, die über einen Spotify-Sync kamen und seit X Tagen (Standard 30) in keiner Jellyfin-Playlist mehr stehen. Geschützt: Favoriten in Finamp/Jellyfin oder Tonspur (Song oder Album), Songs in irgendeiner Playlist (auch selbst angelegten), in der Frist gehörte Songs, alles ohne Sync-Herkunft. Vorschau zeigt vorher, was weg würde. Läuft einmal täglich.
 - **Qualitäts-Upgrade**: findet Songs unter 320 kbps (YouTube-Rückfälle, SoundCloud, alte 128er), sucht sie bei Deezer und lädt sie in MP3 320 neu. Die alte Datei wird erst gelöscht, wenn die neue in Jellyfin angekommen ist; sonst kommt sie zurück. Geht nur, solange Deemix 320 laden darf (Deezer Premium).
 - **Push-Nachrichten** über die App „ntfy“: neue Songs in Sync-Playlists, Sync-Fehler, abgelaufene Deezer-ARL, gesperrter Spotify-Zugriff, Aufräumen, Upgrade fertig. Adresse in Tonspur eintragen, in der ntfy-App dasselbe Thema abonnieren.
-- **Songtexte**: Jellyfin-Plugin „LrcLib“ (Dashboard → Plugins → Katalog) installieren, Jellyfin neu starten. Finamp zeigt die Texte dann mitlaufend.
+- **Songtexte**: Tonspur holt sie von LRCLIB (ein Song pro Sekunde, wartet bei Drosselung) und legt sie als `.lrc` (mitlaufend) bzw. `.txt` neben die Musikdatei; Jellyfin liest sie ein, Finamp zeigt sie an. Läuft nach neuen Downloads und täglich, manuell unter Status. Das Jellyfin-Plugin „LrcLib“ ist dafür nicht nötig – es gibt bei Drosselung schnell auf und braucht ein Künstler-Tag.
 
 ## Deezer-Qualität
 
@@ -206,6 +206,7 @@ tonspur/
 │   ├── cleanup.js      Aufräumen nicht mehr gebrauchter Sync-Songs
 │   ├── upgrade.js      Songs unter 320 kbps von Deezer neu laden
 │   ├── notify.js       Push über ntfy
+│   ├── lyrics.js       Songtexte von LRCLIB als .lrc neben die Dateien
 │   ├── settings.js     in der App geänderte Einstellungen
 │   ├── media.js        ffmpeg, schneller Download, Tags/Cover, Zwischenspeicher
 │   ├── favorites.js    Favoriten als JSON
@@ -240,6 +241,7 @@ tonspur/
 | GET/POST | `/api/cleanup`, `/api/cleanup/run` | Vorschau / jetzt aufräumen |
 | GET/POST | `/api/upgrade`, `/api/upgrade/reset` | Qualitäts-Upgrade |
 | POST | `/api/notify/test` | Test-Push |
+| GET/POST | `/api/lyrics`, `/api/lyrics/run` `{retryNone}` | Songtexte: Stand / jetzt suchen |
 | GET/DELETE | `/api/downloads` | Download-Status / erledigte ausblenden |
 | GET/POST/DELETE | `/api/favorites` | Favoriten |
 | GET | `/api/library/albums`, `/api/jf/album/:id` | Jellyfin-Bibliothek |

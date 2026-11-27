@@ -8,6 +8,7 @@ import * as downloads from './downloads.js';
 import * as favorites from './favorites.js';
 import * as imports from './imports.js';
 import * as jellyfin from './jellyfin.js';
+import * as lyrics from './lyrics.js';
 import * as notify from './notify.js';
 import * as settings from './settings.js';
 import { proxy, proxyChunked } from './proxy.js';
@@ -134,6 +135,8 @@ api.get('/cleanup', async (_req, res) => res.json(await cleanup.status()));
 api.post('/cleanup/run', async (_req, res) => res.json(await cleanup.run({ manual: true })));
 api.get('/upgrade', async (_req, res) => res.json(await upgrade.status()));
 api.post('/upgrade', async (_req, res) => res.json(await upgrade.start()));
+api.get('/lyrics', (_req, res) => res.json(lyrics.status()));
+api.post('/lyrics/run', (req, res) => res.json(lyrics.start({ retryNone: Boolean(req.body?.retryNone) })));
 api.post('/upgrade/reset', async (_req, res) => {
   await upgrade.reset();
   res.json({ ok: true });
@@ -335,7 +338,7 @@ app.use((req, res, next) => {
 
 await settings.init();
 await Promise.all([favorites.init(), downloads.init(), resolver.init(), soundcloud.init(), imports.init(), spotify.init()]);
-await Promise.all([sync.init(), cleanup.init(), upgrade.init()]);
+await Promise.all([sync.init(), cleanup.init(), upgrade.init(), lyrics.init()]);
 
 app.listen(config.port, config.host, async () => {
   log('server', `läuft auf http://${config.host}:${config.port}`);
