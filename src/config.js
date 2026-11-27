@@ -1,3 +1,4 @@
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -26,6 +27,9 @@ export const config = {
   root,
   publicDir: path.join(root, 'public'),
   dataDir: path.resolve(root, str('DATA_DIR', 'data')),
+  get cacheDir() {
+    return path.join(this.dataDir, 'cache');
+  },
   port: int('PORT', 3000),
   host: str('HOST', '0.0.0.0'),
 
@@ -53,5 +57,26 @@ export const config = {
     resolveTimeoutMs: int('STREAM_RESOLVE_TIMEOUT_MS', 8000),
   },
 
+  // Ordner, den Jellyfin als Musikbibliothek nutzt (für SoundCloud-Downloads)
+  musicDir: path.resolve(str('MUSIC_DIR', '~/jellyfin-app/media/music').replace(/^~(?=$|\/)/, os.homedir())),
+  ffmpegBin: str('FFMPEG_BIN', 'ffmpeg'),
+  // Zwischenspeicher für SoundCloud-Audio (MB)
+  cacheLimitMb: int('CACHE_LIMIT_MB', 1500),
+
+  spotify: {
+    clientId: str('SPOTIFY_CLIENT_ID'),
+    clientSecret: str('SPOTIFY_CLIENT_SECRET'),
+  },
+
+  // Spotify-Playlists, die als Jellyfin-Playlists gespiegelt werden
+  sync: {
+    intervalHours: int('SYNC_INTERVAL_HOURS', 6),
+    playlists: str('SYNC_SPOTIFY_PLAYLISTS').split(/[\s,]+/).filter(Boolean),
+  },
+
   autoDownloadOnPlay: bool('AUTO_DOWNLOAD_ON_PLAY', true),
+
+  // Startwerte; geändert wird in der App (data/settings.json)
+  ntfyUrl: str('NTFY_URL'),
+  cleanup: { days: int('CLEANUP_DAYS', 30) },
 };

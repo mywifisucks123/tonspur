@@ -1,6 +1,7 @@
 // Client für die Web-API des Deemix-Containers (deemix-gui / deemix-docker).
 // Deemix hält den Deezer-Login pro HTTP-Session, deshalb merken wir uns das Cookie.
 import { config } from './config.js';
+import * as notify from './notify.js';
 import { HttpError, log } from './util.js';
 
 const { url: BASE } = config.deemix;
@@ -57,6 +58,7 @@ async function doLogin() {
   const status = typeof res === 'object' ? res?.status : Number(res);
   if (![1, 2, 3].includes(Number(status))) {
     loggedIn = false;
+    notify.quiet('Deezer-Login fehlgeschlagen', 'Deemix kann sich nicht bei Deezer anmelden – die ARL ist vermutlich abgelaufen. Neue ARL aus dem Browser-Cookie in die .env eintragen und Tonspur neu starten. Bis dahin lädt Tonspur über YouTube.', { tags: ['warning'], dedupe: 'deemix-login', dedupeHours: 24 });
     throw new HttpError(502, `Deemix-Login fehlgeschlagen (Status ${status}) – ARL abgelaufen?`);
   }
   loggedIn = true;
@@ -71,15 +73,19 @@ export function login({ force = false } = {}) {
   return loginPromise;
 }
 
-/**
- * Legt Track oder Album in die Deemix-Warteschlange.
- * Liefert die Deemix-UUIDs zurück (Format: `${type}_${id}_${bitrate}`).
- */
-export async function addToQueue(type, id) {
-  const { bitrate } = config.deemix;
-  const link = `https://www.deezer.com/${type}/${id}`;
-  const fallbackUuid = `${type}_${id}_${bitrate}`;
+// Qualitätsstufen von oben nach unten. Konten ohne HiFi/Premium bekommen von Deemix
+// "CantStream", dann geht es eine Stufe tiefer – und dabei bleibt es bis zum Neustart.
+const LADDER = [9, 3, 1];
+const BITRATE_NAMES = { 9: 'FLAC', 3: 'MP3 320', 1: 'MP3 128' };
+let effectiveBitrate = config.deemix.bitrate;
 
+export const quality = () => ({
+  bitrate: effectiveBitrate,
+  name: BITRATE_NAMES[effectiveBitrate] ?? String(effectiveBitrate),
+  reduced: effectiveBitrate !== config.deemix.bitrate,
+});
+
+async function add(link, bitrate) {
   for (let attempt = 0; attempt < 2; attempt++) {
     await login({ force: attempt > 0 });
     const res = await call('/api/addToQueue', {
@@ -87,19 +93,41 @@ export async function addToQueue(type, id) {
       body: { url: link, bitrate },
       timeout: 30000,
     });
+    if (res?.result === false && res.errid === 'NotLoggedIn' && attempt === 0) {
+      loggedIn = false;
+      continue;
+    }
+    return res;
+  }
+  throw new HttpError(502, 'Deemix: Login fehlgeschlagen');
+}
+
+/**
+ * Legt Track oder Album in die Deemix-Warteschlange.
+ * Liefert die Deemix-UUIDs zurück (Format: `${type}_${id}_${bitrate}`).
+ */
+export async function addToQueue(type, id, { minBitrate = 0 } = {}) {
+  const link = `https://www.deezer.com/${type}/${id}`;
+  if (effectiveBitrate < minBitrate) throw new HttpError(409, `Deemix lädt gerade nur ${BITRATE_NAMES[effectiveBitrate]}`);
+  for (;;) {
+    const bitrate = effectiveBitrate;
+    const res = await add(link, bitrate);
+    const fallbackUuid = `${type}_${id}_${bitrate}`;
     if (res?.result === false) {
-      if (res.errid === 'NotLoggedIn' && attempt === 0) {
-        loggedIn = false;
+      if (res.errid === 'AlreadyInQueue') return [fallbackUuid];
+      const lower = LADDER.find((b) => b < bitrate);
+      if (res.errid === 'CantStream' && lower && lower >= minBitrate) {
+        log('deemix', `Konto darf ${BITRATE_NAMES[bitrate]} nicht laden → ${BITRATE_NAMES[lower]}`);
+        effectiveBitrate = lower;
         continue;
       }
-      if (res.errid === 'AlreadyInQueue') return [fallbackUuid];
+      if (res.errid === 'CantStream' && minBitrate) throw new HttpError(502, `Deemix: in ${BITRATE_NAMES[bitrate]} nicht verfügbar`);
       throw new HttpError(502, `Deemix: ${res.errid ?? 'addToQueue fehlgeschlagen'}`);
     }
     const objs = [res?.data?.obj ?? res?.obj].flat().filter(Boolean);
     const uuids = objs.map((o) => o.uuid).filter(Boolean);
     return uuids.length ? uuids : [fallbackUuid];
   }
-  throw new HttpError(502, 'Deemix: Login fehlgeschlagen');
 }
 
 /** Status aller Deemix-Jobs: Map uuid → { status, progress } */
@@ -128,5 +156,5 @@ export async function queueStatus() {
 
 export async function ping() {
   const res = await call('/api/connect', { timeout: 4000 });
-  return { ok: true, loggedIn, deezerAvailable: res?.deezerAvailable ?? null };
+  return { ok: true, loggedIn, deezerAvailable: res?.deezerAvailable ?? null, quality: quality() };
 }

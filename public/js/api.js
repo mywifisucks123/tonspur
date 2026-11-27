@@ -31,21 +31,49 @@ export const api = {
   charts: () => cached('/charts', 30 * 60 * 1000),
   album: (id) => cached(`/album/${id}`),
   artist: (id) => cached(`/artist/${id}`),
+  playlist: (id) => cached(`/playlist/${id}`, 10 * 60 * 1000),
   jfAlbum: (id) => cached(`/jf/album/${id}`, 60 * 1000),
   libraryAlbums: () => request('/library/albums'),
   favorites: () => request('/favorites'),
   addFavorite: (type, item) => request('/favorites', { method: 'POST', body: { type, item } }),
   removeFavorite: (type, item) => request(`/favorites/${type}/${item.source}/${item.id}`, { method: 'DELETE' }),
-  download: (type, id, reason = 'manual', force = false) =>
-    request('/download', { method: 'POST', body: { type, id, reason, force } }),
+  download: (type, id, reason = 'manual', force = false, source) =>
+    request('/download', { method: 'POST', body: { type, id, reason, force, source } }),
   downloads: () => request('/downloads'),
   clearDownloads: () => request('/downloads', { method: 'DELETE' }),
-  source: (id) => request(`/source/dz/${id}`),
-  prefetch: (ids) => {
-    const list = ids.filter(Boolean);
-    if (!list.length) return Promise.resolve();
-    return request('/prefetch', { method: 'POST', body: { ids: list } }).catch(() => {});
+  source: (id, { wait = true } = {}) => request(`/source/dz/${id}${wait ? '' : '?wait=0'}`),
+  // Nimmt Track-Objekte oder Deezer-IDs; Jellyfin-Titel brauchen kein Vorladen
+  prefetch: (tracks, { files = 0 } = {}) => {
+    const keys = tracks
+      .filter(Boolean)
+      .map((t) => (typeof t === 'object' ? (t.source === 'jf' || t.local ? null : `${t.source}:${t.id}`) : `dz:${t}`))
+      .filter(Boolean);
+    if (!keys.length) return Promise.resolve();
+    return request('/prefetch', { method: 'POST', body: { keys, files } }).catch(() => {});
   },
+  scPlaylist: (id) => cached(`/sc/playlist/${id}`, 10 * 60 * 1000),
+  importLink: (url) => request('/import', { method: 'POST', body: { url } }),
+  imports: () => request('/imports'),
+  imported: (id) => request(`/imports/${encodeURIComponent(id)}`),
+  removeImport: (id) => request(`/imports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  syncStatus: (id) => request(id ? `/sync/${encodeURIComponent(id)}` : '/sync'),
+  setSync: (id, enabled) => request(`/sync/${encodeURIComponent(id)}`, { method: 'POST', body: { enabled } }),
+  setSyncMode: (id, mode) => request(`/sync/${encodeURIComponent(id)}`, { method: 'POST', body: { mode } }),
+  syncLink: (url, mode) => request('/sync-link', { method: 'POST', body: { url, mode } }),
+  spotifyAccount: () => request('/spotify/account'),
+  spotifyPlaylists: () => request('/spotify/playlists'),
+  spotifyLogout: () => request('/spotify/logout', { method: 'POST' }),
+  settings: () => request('/settings'),
+  saveSettings: (patch) => request('/settings', { method: 'POST', body: patch }),
+  testNotify: () => request('/notify/test', { method: 'POST' }),
+  cleanup: () => request('/cleanup'),
+  runCleanup: () => request('/cleanup/run', { method: 'POST' }),
+  upgrade: () => request('/upgrade'),
+  startUpgrade: () => request('/upgrade', { method: 'POST' }),
+  resetUpgrade: () => request('/upgrade/reset', { method: 'POST' }),
+  lyrics: () => request('/lyrics'),
+  runLyrics: (retryNone) => request('/lyrics/run', { method: 'POST', body: { retryNone } }),
+  runSync: (id) => request(`/sync/${encodeURIComponent(id)}/run`, { method: 'POST' }),
   health: () => request('/health'),
 };
 

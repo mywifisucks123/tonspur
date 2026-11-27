@@ -8,9 +8,12 @@ services:
       # Jellyfin und Deemix laufen auf dem Mac selbst, nicht in diesem Container
       JELLYFIN_URL: http://host.docker.internal:8096
       DEEMIX_URL: http://host.docker.internal:6595
+      MUSIC_DIR: /music
     ports:
       - "3000:3000"
     volumes:
       - ./data:/app/data
+      # SoundCloud-Downloads landen direkt im Jellyfin-Ordner
+      - ~/jellyfin-app/media/music:/music
     extra_hosts:
       - "host.docker.internal:host-gateway"

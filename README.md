@@ -10,17 +10,108 @@ iPhone (PWA)  ──HTTPS──▶  Tonspur-Backend (Node, Port 3000)
                                └─ Deemix :6595 ...... FLAC-Download → ~/jellyfin-app/media/music
 ```
 
+## Empfohlener Dauerbetrieb: native App + Spotify-Sync
+
+Für den Alltag auf dem iPhone brauchst du die Tonspur-Web-App nicht. Stabiler ist eine native Jellyfin-App aus dem App Store, empfohlen: **Finamp** (kostenlos, Open Source, Offline-Downloads, CarPlay). Tonspur läuft dann als Dienst im Hintergrund und sorgt dafür, dass in Jellyfin alles liegt, was du hören willst:
+
+- **Spotify-Playlists** werden als echte Jellyfin-Playlists gespiegelt. Neue Titel bei Spotify landen automatisch in der Bibliothek und in der Playlist, entfernte verschwinden aus der Playlist (die Datei bleibt). Abgleich alle `SYNC_INTERVAL_HOURS` Stunden (Standard 6) und nach jedem Download-Schub.
+- Titel holt Deemix von Deezer. Kann Deemix einen Titel nicht liefern oder gibt es ihn bei Deezer nicht, kommt er über YouTube Music als M4A mit Tags und Cover in den Musikordner.
+- Das Spotify-Cover wird als Bild der Jellyfin-Playlist gesetzt (und erneuert, wenn es sich bei Spotify ändert).
+- Die Playlist behält in Jellyfin dieselbe ID. Finamp aktualisiert sie also, statt eine neue anzulegen, auch wenn du sie offline geladen hast.
+
+**Playlists einrichten**, zwei Wege:
+
+1. In der Tonspur-Web-App: Spotify-Link (Teilen → Link kopieren) ins Suchfeld → „Übernehmen" → auf der Playlist-Seite „Synchronisieren".
+2. Ohne Oberfläche in der `.env`:
+   ```
+   SYNC_SPOTIFY_PLAYLISTS=https://open.spotify.com/playlist/AAA,https://open.spotify.com/playlist/BBB
+   ```
+   Nach `pm2 restart tonspur` bzw. `docker compose … up -d` legt der Dienst die Playlists innerhalb einer Minute an.
+
+**Modus pro Playlist** (Schalter auf der Playlist-Seite):
+
+- „Wie bei Spotify": exakte Kopie, bei Spotify entfernte Songs fliegen auch in Jellyfin raus. Gut für Charts.
+- „Songs behalten": neue Songs kommen dazu, entfernte bleiben stehen (hinten angehängt). Gut für „meine Musik".
+
+In der `.env` schaltet ein angehängtes `|behalten` den zweiten Modus beim ersten Anlegen ein: `…/playlist/AAA|behalten`. Die Dateien selbst löscht Tonspur in keinem Modus.
+
+Die Playlists gehören dem Jellyfin-Benutzer, mit dem Tonspur arbeitet (erster Admin oder `JELLYFIN_USER_ID`), und sind als öffentlich markiert. Melde dich in Finamp mit diesem Benutzer an.
+
+Ohne Spotify-Zugangsdaten liest Tonspur höchstens etwa 100 Titel pro Playlist (siehe „Spotify-Playlists übernehmen").
+
 ## So funktioniert die Wiedergabe
 
 Tippst du auf einen Song, entscheidet das Backend in dieser Reihenfolge:
 
 1. Song liegt schon in Jellyfin → Stream direkt vom Mac Mini (FLAC, volle Qualität). Badge im Player: „Bibliothek".
 2. Sonst kompletter Song über yt-dlp (YouTube Music, offizielle Audio-Version, per Dauer und Titel abgeglichen). Badge: „Stream". Die ersten Treffer jeder Suche, Album- und Künstlerseite werden schon beim Anzeigen vorgeladen, deshalb startet der Song nach dem Tippen ohne Wartezeit.
-3. Ist yt-dlp nicht installiert oder braucht länger als 8 s → 30-Sekunden-Vorschau von Deezer. Badge: „Vorschau · 30 s".
+3. Braucht yt-dlp länger als 8 s → zuerst die 30-Sekunden-Vorschau von Deezer (Badge: „Vorschau · 30 s"). Sobald der ganze Song bereit ist, wechselt der Player automatisch darauf und meldet „Ganzer Song geladen". Endet die Vorschau vorher, wartet er auf den ganzen Song, statt weiterzuspringen. Ohne yt-dlp bleibt es bei der Vorschau.
+
+YouTube drosselt Downloads ohne festes Ende auf etwa doppelte Abspielgeschwindigkeit. Der Server holt die Audiodatei deshalb in festen 10-MB-Stücken (wie yt-dlp selbst) und reicht sie an das iPhone weiter – damit kommt sie mit voller Bandbreite.
+
+Turbo: Beim Öffnen einer Playlist, eines Albums oder einer Künstlerseite werden die Stream-Adressen der ersten 30 Titel vorab geholt, während der Wiedergabe immer die nächsten 5. Ein angetippter Song wartet nie auf vorgeladene Songs. Gefundene YouTube-Videos merkt sich das Backend dauerhaft (`data/yt-ids.json`), beim zweiten Abspielen entfällt die Suche. Wenn der Stream hakt, zeigt Bibliothek → Status den letzten yt-dlp-Fehler.
 
 Nach 5 Sekunden Wiedergabe schickt die App lautlos `POST /api/download` ans Backend. Die 5 Sekunden sind Absicht: Wer durch Charts skippt, soll nicht 40 Songs auf die Platte laden. Das Backend prüft, ob der Song schon in Jellyfin liegt, und schickt ihn sonst an Deemix. Es fragt den Fortschritt alle 3 s ab und startet nach dem letzten fertigen Download (15 s Puffer, damit mehrere Downloads nur einen Scan auslösen) den Jellyfin-Scan. Ab dann kommt derselbe Song automatisch aus der Bibliothek.
 
-Das Herz bei einem Song oder Album macht dasselbe sofort, beim Album für das komplette Album. Favoriten liegen in `data/favorites.json` auf dem Mac Mini, nicht im Browser.
+Das Herz bei einem Song oder Album macht dasselbe sofort, beim Album für das komplette Album. Öffentliche Deezer-Playlists findest du in der Suche unter „Playlists"; der Download-Knopf auf der Playlist-Seite lädt jeden Titel einzeln, damit die Ordnerstruktur nach Künstler/Album sauber bleibt. Favoriten liegen in `data/favorites.json` auf dem Mac Mini, nicht im Browser.
+
+## SoundCloud
+
+Die Suche zeigt SoundCloud-Treffer unter „Alle" und im Reiter „SoundCloud", dazu SoundCloud-Playlists. Kein Konto nötig; Tonspur nutzt dieselbe Schnittstelle wie soundcloud.com. Abgespielt wird über yt-dlp: Der Song wird in 1–3 s komplett als MP3 auf den Mac geladen (Zwischenspeicher `data/cache/sc`, begrenzt auf `CACHE_LIMIT_MB`) und von dort gestreamt. Go+-Titel (bei SoundCloud nur 30-s-Ausschnitt) werden ausgeblendet.
+
+Gehörte oder gelikte SoundCloud-Songs landen mit Titel, Künstler und Cover als `<Künstler>/<Titel>/<Titel>.mp3` in `MUSIC_DIR` (Standard `~/jellyfin-app/media/music`), danach folgt der Jellyfin-Scan. SoundCloud liefert meist 128–160 kbps, nicht FLAC.
+
+Voraussetzung: `brew install ffmpeg`.
+
+## Spotify-Playlists übernehmen
+
+Spotify-Link einer Playlist oder eines Albums (Teilen → Link kopieren) in die Suche einfügen → „Übernehmen". Tonspur sucht jeden Titel bei Deezer (über ISRC, sonst Künstler + Titel + Dauer) und legt die Playlist unter Bibliothek → Playlists ab. Abgespielt und geladen wird dann ganz normal über Deezer/YouTube; Spotify selbst lässt sich nicht abspielen (DRM). „Neu abgleichen" holt den aktuellen Stand der Playlist.
+
+Ohne Zugangsdaten liest Tonspur die öffentliche Einbettungsseite von Spotify. Das klappt auch für Spotifys eigene Playlists (Today's Top Hits, RapCaviar …), liefert aber höchstens etwa 100 Titel.
+
+### Spotify verbinden (Lieblingssongs, eigene Playlists ohne 100er-Grenze)
+
+Seit Februar 2026 gilt für selbst angelegte Spotify-Apps: Der Besitzer braucht **Spotify Premium** (läuft es aus, antwortet die API nicht mehr), und Inhalte gibt es nur für **eigene bzw. gemeinsame** Playlists und die Lieblingssongs. Fremde und Spotify-eigene Playlists laufen weiter über die Einbettungsseite.
+
+1. Tonspur über die HTTPS-Adresse öffnen (Tailscale, `https://…ts.net:8451`) → Bibliothek → Spotify. Dort steht die Redirect URI.
+2. developer.spotify.com → Dashboard → „Create app“: Name egal, Redirect URI von Schritt 1 eintragen, „Web API“ ankreuzen.
+3. Client ID und Secret als `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET` in die `.env`, Tonspur neu starten (`docker compose … up -d`).
+4. Bibliothek → Spotify → „Spotify verbinden“ (am besten im normalen Browser), danach bei Lieblingssongs und eigenen Playlists „Synchronisieren“.
+
+Läuft Premium aus, meldet Tonspur das (Status + Push) und lässt die Playlists auf dem letzten Stand – sie schrumpfen nicht auf 100 Titel. Mit Premium wieder an geht es automatisch weiter.
+
+## Aufräumen, Qualität, Push (Bibliothek → Status)
+
+- **Aufräumen** (Standard aus): löscht Songs, die über einen Spotify-Sync kamen und seit X Tagen (Standard 30) in keiner Jellyfin-Playlist mehr stehen. Geschützt: Favoriten in Finamp/Jellyfin oder Tonspur (Song oder Album), Songs in irgendeiner Playlist (auch selbst angelegten), in der Frist gehörte Songs, alles ohne Sync-Herkunft. Vorschau zeigt vorher, was weg würde. Läuft einmal täglich.
+- **Qualitäts-Upgrade**: findet Songs unter 320 kbps (YouTube-Rückfälle, SoundCloud, alte 128er), sucht sie bei Deezer und lädt sie in MP3 320 neu. Die alte Datei wird erst gelöscht, wenn die neue in Jellyfin angekommen ist; sonst kommt sie zurück. Geht nur, solange Deemix 320 laden darf (Deezer Premium).
+- **Push-Nachrichten** über die App „ntfy“: neue Songs in Sync-Playlists, Sync-Fehler, abgelaufene Deezer-ARL, gesperrter Spotify-Zugriff, Aufräumen, Upgrade fertig. Adresse in Tonspur eintragen, in der ntfy-App dasselbe Thema abonnieren.
+- **Songtexte**: Tonspur holt sie von LRCLIB (ein Song pro Sekunde, wartet bei Drosselung) und legt sie als `.lrc` (mitlaufend) bzw. `.txt` neben die Musikdatei; Jellyfin liest sie ein, Finamp zeigt sie an. Läuft nach neuen Downloads und täglich, manuell unter Status. Das Jellyfin-Plugin „LrcLib“ ist dafür nicht nötig – es gibt bei Drosselung schnell auf und braucht ein Künstler-Tag.
+
+## Deezer-Qualität
+
+Tonspur fordert bei Deemix zuerst `DEEMIX_BITRATE` an (Standard FLAC). Lehnt Deemix mit „CantStream" ab, weil das Konto diese Qualität nicht laden darf, geht es automatisch auf MP3 320 und dann MP3 128 herunter. Die tatsächlich genutzte Qualität steht unter Bibliothek → Status.
+
+## Homeserver mit Docker (z. B. ThinkCentre)
+
+`homeserver.compose.yml` startet Jellyfin, Deemix und Tonspur zusammen. Sie teilen sich den Musikordner (`./music` oder `MUSIC_HOST_DIR` in der `.env`).
+
+```bash
+git clone https://github.com/mywifisucks123/tonspur.git ~/tonspur
+cd ~/tonspur
+cp .env.example .env          # JELLYFIN_API_KEY bleibt erst mal leer
+docker compose -f homeserver.compose.yml up -d --build
+```
+
+Ist Port 3000 auf dem Server schon belegt, in der `.env` z. B. `TONSPUR_PORT=8787` setzen.
+
+Danach:
+
+1. `http://<server>:8096`: Jellyfin einrichten, Musikbibliothek mit dem Ordner `/media/music` anlegen, unter Dashboard → API-Schlüssel einen Schlüssel erzeugen.
+2. `http://<server>:6595`: In Deemix mit dem ARL anmelden. Download-Ordner ist `/downloads`, das ist bereits der Musikordner.
+3. In der `.env` `JELLYFIN_API_KEY`, `DEEMIX_ARL` und optional `SYNC_SPOTIFY_PLAYLISTS` eintragen, dann `docker compose -f homeserver.compose.yml up -d`.
+4. Tailscale auf dem Server installieren und Jellyfin per HTTPS freigeben: `sudo tailscale serve --bg 8096`. In Finamp dann die angezeigte Adresse `https://<server>.<tailnet>.ts.net` eintragen. Die Tonspur-Web-App ist parallel erreichbar über `sudo tailscale serve --bg --https=8443 3000`.
+
+Hardware-Transcoding mit Intel Quick Sync: Die `devices`-Zeilen bei Jellyfin einkommentieren, wenn `/dev/dri` existiert.
 
 ## Vorab: zwei Punkte, an denen es sonst hakt
 
@@ -53,7 +144,7 @@ Optional `JELLYFIN_MUSIC_LIBRARY_ID`, damit nur die Musikbibliothek gescannt wir
 ### Variante A: PM2 (empfohlen, nativ auf dem Mac)
 
 ```bash
-brew install node yt-dlp
+brew install node yt-dlp deno ffmpeg
 npm install -g pm2
 
 cd ~/tonspur
@@ -108,6 +199,16 @@ tonspur/
 │   ├── deemix.js       Deemix-API (Login per ARL, addToQueue, getQueue)
 │   ├── jellyfin.js     Jellyfin-API (Suche, Abgleich, Stream, Scan)
 │   ├── deezer.js       öffentliche Deezer-API
+│   ├── soundcloud.js   SoundCloud-Suche, -Audio, Ablage im Musikordner
+│   ├── spotify.js      Spotify-Import und Abgleich mit Deezer
+│   ├── imports.js      gespeicherte Spotify-Importe
+│   ├── sync.js         Spotify-Playlists → Jellyfin-Playlists
+│   ├── cleanup.js      Aufräumen nicht mehr gebrauchter Sync-Songs
+│   ├── upgrade.js      Songs unter 320 kbps von Deezer neu laden
+│   ├── notify.js       Push über ntfy
+│   ├── lyrics.js       Songtexte von LRCLIB als .lrc neben die Dateien
+│   ├── settings.js     in der App geänderte Einstellungen
+│   ├── media.js        ffmpeg, schneller Download, Tags/Cover, Zwischenspeicher
 │   ├── favorites.js    Favoriten als JSON
 │   └── util.js
 ├── public/             PWA: index.html, manifest, Service Worker, CSS, JS, Icons
@@ -122,12 +223,25 @@ tonspur/
 |---|---|---|
 | GET | `/api/search?q=` | Deezer-Songs/Alben/Künstler + Treffer aus Jellyfin |
 | GET | `/api/charts` | Startseite |
-| GET | `/api/album/:id`, `/api/artist/:id` | Deezer-Details |
+| GET | `/api/album/:id`, `/api/artist/:id`, `/api/playlist/:id` | Deezer-Details |
 | GET | `/api/stream/dz/:id` | Audio für einen Deezer-Track (Quelle automatisch) |
 | GET | `/api/stream/jf/:id` | Audio direkt aus Jellyfin |
 | GET | `/api/source/dz/:id` | welche Quelle gerade genutzt wird |
 | POST | `/api/prefetch` `{ids}` | yt-dlp-Auflösung vorwärmen |
-| POST | `/api/download` `{type, id, reason}` | Track/Album an Deemix |
+| POST | `/api/download` `{type, id, reason, source}` | Track/Album/Playlist laden (`type: sc` für SoundCloud) |
+| GET | `/api/sc/playlist/:id`, `/api/stream/sc/:id` | SoundCloud-Playlist / -Audio |
+| POST | `/api/import` `{url}` | Spotify-Playlist/-Album übernehmen oder SoundCloud-Link auflösen |
+| GET/DELETE | `/api/imports`, `/api/imports/:id` | übernommene Spotify-Playlists |
+| GET/POST | `/api/sync`, `/api/sync/:id` `{enabled}` | Spotify → Jellyfin-Sync ein/aus, Status |
+| POST | `/api/sync/:id/run` | sofort abgleichen |
+| POST | `/api/sync-link` `{url, mode}` | Spotify-Link direkt synchronisieren (auch Lieblingssongs) |
+| GET | `/api/spotify/account`, `/api/spotify/playlists` | Spotify-Verbindung, eigene Playlists |
+| GET | `/api/spotify/login?redirect=`, `/api/spotify/callback` | Spotify verbinden (OAuth) |
+| GET/POST | `/api/settings` | Aufräumen, ntfy |
+| GET/POST | `/api/cleanup`, `/api/cleanup/run` | Vorschau / jetzt aufräumen |
+| GET/POST | `/api/upgrade`, `/api/upgrade/reset` | Qualitäts-Upgrade |
+| POST | `/api/notify/test` | Test-Push |
+| GET/POST | `/api/lyrics`, `/api/lyrics/run` `{retryNone}` | Songtexte: Stand / jetzt suchen |
 | GET/DELETE | `/api/downloads` | Download-Status / erledigte ausblenden |
 | GET/POST/DELETE | `/api/favorites` | Favoriten |
 | GET | `/api/library/albums`, `/api/jf/album/:id` | Jellyfin-Bibliothek |

@@ -1,5 +1,7 @@
 // Jellyfin: Bibliothek durchsuchen, Songs streamen, Scan anstoßen.
+import path from 'node:path';
 import { config } from './config.js';
+import { exists } from './media.js';
 import { HttpError, TtlCache, log, norm } from './util.js';
 
 const { url: BASE, apiKey } = config.jellyfin;
@@ -13,11 +15,16 @@ export function authHeaders() {
   };
 }
 
-async function jf(path, { method = 'GET', timeout = 8000 } = {}) {
+async function jf(path, { method = 'GET', timeout = 8000, body } = {}) {
   if (!apiKey) throw new HttpError(503, 'JELLYFIN_API_KEY fehlt');
   const res = await fetch(BASE + path, {
     method,
-    headers: { ...authHeaders(), Accept: 'application/json' },
+    headers: {
+      ...authHeaders(),
+      Accept: 'application/json',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(timeout),
   });
   if (!res.ok) throw new HttpError(res.status === 401 ? 502 : res.status, `Jellyfin ${res.status} ${path}`);
@@ -164,6 +171,174 @@ export async function refreshLibrary() {
     await jf('/Library/Refresh', { method: 'POST' });
   }
   log('jellyfin', 'Bibliothek-Scan gestartet');
+}
+
+/** Einzelnen Song neu einlesen, z. B. damit Jellyfin eine neue .lrc-Datei daneben findet. */
+export async function refreshItem(id) {
+  await jf(
+    `/Items/${encodeURIComponent(id)}/Refresh?MetadataRefreshMode=FullRefresh&ImageRefreshMode=None&ReplaceAllMetadata=false&ReplaceAllImages=false`,
+    { method: 'POST', timeout: 15000 },
+  );
+}
+
+// --- Playlists (erscheinen in jeder Jellyfin-App, z. B. Finamp) --------------
+
+export async function playlistExists(id) {
+  const uid = await userId();
+  const res = await jf(`/Items?userId=${uid}&Ids=${encodeURIComponent(id)}`).catch(() => null);
+  return Boolean(res?.Items?.length);
+}
+
+async function playlistEntries(id) {
+  const uid = await userId();
+  const res = await jf(`/Playlists/${encodeURIComponent(id)}/Items?userId=${uid}`);
+  return (res?.Items ?? []).map((i) => ({ itemId: i.Id, entryId: i.PlaylistItemId }));
+}
+
+export async function createPlaylist(name, ids) {
+  const uid = await userId();
+  const res = await jf('/Playlists', {
+    method: 'POST',
+    body: { Name: name, Ids: ids, UserId: uid, MediaType: 'Audio', IsPublic: true },
+    timeout: 30000,
+  });
+  log('jellyfin', `Playlist "${name}" angelegt (${ids.length} Titel)`);
+  return res.Id;
+}
+
+/**
+ * Bild (z. B. Spotify-Cover) als Hauptbild eines Eintrags setzen. Jellyfin erwartet den
+ * Bildinhalt Base64-kodiert im Body. Klappt das nicht, darf Jellyfin das Bild selbst laden.
+ */
+export async function setItemImage(id, imageUrl) {
+  const item = encodeURIComponent(id);
+  try {
+    const img = await fetch(imageUrl, { signal: AbortSignal.timeout(10000) });
+    if (!img.ok) throw new Error(`Bild ${img.status}`);
+    const type = (img.headers.get('content-type') || 'image/jpeg').split(';')[0];
+    if (!type.startsWith('image/')) throw new Error(`kein Bild (${type})`);
+    const data = Buffer.from(await img.arrayBuffer()).toString('base64');
+    const res = await fetch(`${BASE}/Items/${item}/Images/Primary`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': type },
+      body: data,
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) throw new Error(`Jellyfin ${res.status}`);
+  } catch (err) {
+    log('jellyfin', `Cover-Upload: ${err.message} – Jellyfin lädt es selbst`);
+    await jf(`/Items/${item}/RemoteImages/Download?type=Primary&imageUrl=${encodeURIComponent(imageUrl)}`, {
+      method: 'POST',
+      timeout: 20000,
+    });
+  }
+}
+
+/** Inhalt einer Playlist exakt auf `ids` (in dieser Reihenfolge) setzen. Liefert true bei Änderung. */
+export async function setPlaylistItems(id, ids) {
+  const uid = await userId();
+  const current = await playlistEntries(id);
+  if (current.length === ids.length && current.every((e, i) => e.itemId === ids[i])) return false;
+  const pid = encodeURIComponent(id);
+  // Leeren und in richtiger Reihenfolge neu befüllen – die Playlist-ID bleibt gleich,
+  // Apps behalten sie also als dieselbe Playlist (inkl. Offline-Download).
+  for (let i = 0; i < current.length; i += 100) {
+    const entries = current.slice(i, i + 100).map((e) => e.entryId).join(',');
+    await jf(`/Playlists/${pid}/Items?entryIds=${entries}`, { method: 'DELETE', timeout: 30000 });
+  }
+  for (let i = 0; i < ids.length; i += 100) {
+    await jf(`/Playlists/${pid}/Items?ids=${ids.slice(i, i + 100).join(',')}&userId=${uid}`, {
+      method: 'POST',
+      timeout: 30000,
+    });
+  }
+  return true;
+}
+
+// --- Bibliothek als Ganzes (Aufräumen, Qualitäts-Upgrade) --------------------
+
+/** Einträge mit Dateipfad, Bitrate und Nutzerdaten (Favorit, zuletzt gehört). */
+export async function itemsByIds(ids) {
+  const uid = await userId();
+  const out = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const res = await jf(`/Items?userId=${uid}&Ids=${ids.slice(i, i + 100).join(',')}&Fields=Path,MediaSources`, { timeout: 30000 });
+    out.push(...(res?.Items ?? []));
+  }
+  return out;
+}
+
+export async function audioItems() {
+  const uid = await userId();
+  const out = [];
+  for (let start = 0; ; start += 500) {
+    const res = await jf(
+      `/Items?userId=${uid}&Recursive=true&IncludeItemTypes=Audio&Fields=Path,MediaSources&SortBy=SortName&StartIndex=${start}&Limit=500`,
+      { timeout: 60000 },
+    );
+    out.push(...(res?.Items ?? []));
+    if (!res?.Items?.length || out.length >= (res.TotalRecordCount ?? 0)) break;
+  }
+  return out;
+}
+
+/** IDs aller Songs, die in irgendeiner Jellyfin-Playlist stehen (auch selbst angelegte in Finamp). */
+export async function allPlaylistItemIds() {
+  const uid = await userId();
+  const res = await jf(`/Items?userId=${uid}&Recursive=true&IncludeItemTypes=Playlist`);
+  const out = new Set();
+  for (const p of res?.Items ?? []) {
+    for (const e of await playlistEntries(p.Id)) out.add(e.itemId);
+  }
+  return out;
+}
+
+/** In Jellyfin/Finamp als Favorit markierte Songs und Alben. */
+export async function favorites() {
+  const uid = await userId();
+  const [tracks, albums] = await Promise.all([
+    jf(`/Items?userId=${uid}&Recursive=true&IncludeItemTypes=Audio&Filters=IsFavorite`),
+    jf(`/Items?userId=${uid}&Recursive=true&IncludeItemTypes=MusicAlbum&Filters=IsFavorite`),
+  ]);
+  return {
+    tracks: new Set((tracks?.Items ?? []).map((i) => i.Id)),
+    albums: new Set((albums?.Items ?? []).map((i) => i.Id)),
+  };
+}
+
+/** Bitrate in bit/s und Codec eines Eintrags (aus MediaSources). */
+export function audioInfo(item) {
+  const src = item.MediaSources?.[0];
+  const stream = src?.MediaStreams?.find((m) => m.Type === 'Audio');
+  return {
+    bitrate: stream?.BitRate ?? src?.Bitrate ?? null,
+    codec: String(stream?.Codec ?? src?.Container ?? '').toLowerCase(),
+  };
+}
+
+// Jellyfin sieht die Musik unter einem anderen Pfad als Tonspur (/media/music vs. /music).
+// Den gemeinsamen Teil finden: hinten anfangen, bis die Datei bei uns existiert.
+let prefix = null;
+export async function localPath(jfPath) {
+  if (!jfPath) return null;
+  const inside = (p) => {
+    const rel = path.relative(config.musicDir, p);
+    return rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
+  if (prefix && jfPath.startsWith(prefix)) {
+    const p = path.join(config.musicDir, jfPath.slice(prefix.length));
+    if (inside(p) && (await exists(p))) return p;
+  }
+  const parts = jfPath.split(/[\\/]+/).filter(Boolean);
+  // mindestens Ordner + Datei, damit nicht zufällig eine gleichnamige Datei passt
+  for (let i = 0; i <= parts.length - 2; i++) {
+    const p = path.join(config.musicDir, ...parts.slice(i));
+    if (inside(p) && (await exists(p))) {
+      prefix = `/${parts.slice(0, i).join('/')}${i ? '/' : ''}`;
+      return p;
+    }
+  }
+  return null;
 }
 
 export async function ping() {

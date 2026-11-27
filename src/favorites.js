@@ -4,16 +4,17 @@ import { config } from './config.js';
 import { readJson, writeJson } from './util.js';
 
 const FILE = path.join(config.dataDir, 'favorites.json');
-let data = { tracks: [], albums: [] };
+let data = { tracks: [], albums: [], playlists: [] };
 
 export async function init() {
-  data = { tracks: [], albums: [], ...(await readJson(FILE, {})) };
+  data = { tracks: [], albums: [], playlists: [], ...(await readJson(FILE, {})) };
 }
 
 const bucket = (type) => {
   if (type === 'track') return data.tracks;
   if (type === 'album') return data.albums;
-  throw new Error('type muss track oder album sein');
+  if (type === 'playlist') return data.playlists;
+  throw new Error('type muss track, album oder playlist sein');
 };
 
 const key = (item) => `${item.source}:${item.id}`;

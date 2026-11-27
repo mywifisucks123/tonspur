@@ -7,6 +7,8 @@ import {
   items,
   jfAlbumView,
   libraryView,
+  playlistView,
+  importView,
   lists,
   loadFavorites,
   markPlaying,
@@ -38,7 +40,12 @@ const routes = [
   [/^\/?$/, 'search', () => searchView()],
   [/^\/album\/(\w+)$/, 'search', (m) => albumView(m[1])],
   [/^\/artist\/(\w+)$/, 'search', (m) => artistView(m[1])],
+  [/^\/playlist\/(\w+)$/, 'search', (m) => playlistView(m[1], 'dz')],
+  [/^\/sc-playlist\/(\w+)$/, 'search', (m) => playlistView(m[1], 'sc')],
+  [/^\/imported\/([\w-]+)$/, 'library', (m) => playlistView(m[1], 'sp')],
+  [/^\/import\?u=(.+)$/, 'search', (m) => importView(decodeURIComponent(m[1]))],
   [/^\/library$/, 'library', () => libraryView()],
+  [/^\/library\/(\w+)(?:\?msg=(.*))?$/, 'library', (m) => libraryView(m[1], m[2] ? decodeURIComponent(m[2]) : null)],
   [/^\/jf-album\/(\w+)$/, 'library', (m) => jfAlbumView(m[1])],
 ];
 
@@ -96,12 +103,21 @@ async function route() {
   root.replaceChildren(result.el);
   mounted = { hash, tab, cleanup: result.cleanup };
 
-  window.scrollTo(0, back || result.keep ? scrollPos.get(hash) ?? 0 : 0);
+  window.scrollTo(0, back || result.keep || keepScroll ? scrollPos.get(hash) ?? 0 : 0);
+  keepScroll = false;
   markPlaying();
   updateHeads();
 }
 
 window.addEventListener('hashchange', route);
+
+/** Aktuelle Ansicht neu laden, ohne Verlauf oder Scrollposition zu verlieren. */
+let keepScroll = false;
+function rerender() {
+  keepScroll = true;
+  stack.pop();
+  route();
+}
 
 function goBack() {
   if (stack.length > 1) history.back();
@@ -161,6 +177,71 @@ document.addEventListener('click', (e) => {
       .download('album', dl.dataset.downloadAlbum, 'manual')
       .then(() => toast('Album wird in die Bibliothek geladen'))
       .catch((err) => toast(`Fehler: ${err.message}`));
+    return;
+  }
+
+  const dlp = t.closest('[data-download-playlist]');
+  if (dlp) {
+    const n = Number(dlp.dataset.count) || 0;
+    if (n > 30 && !confirm(`Alle ${n} Titel in die Bibliothek laden?`)) return;
+    api
+      .download('playlist', dlp.dataset.downloadPlaylist, 'manual', false, dlp.dataset.source)
+      .then(() => toast(`${n} Titel werden in die Bibliothek geladen`))
+      .catch((err) => toast(`Fehler: ${err.message}`));
+    return;
+  }
+
+  const syncToggle = t.closest('[data-sync-toggle]');
+  if (syncToggle) {
+    const on = !syncToggle.dataset.on;
+    syncToggle.disabled = true;
+    api
+      .setSync(syncToggle.dataset.syncToggle, on)
+      .then(() => {
+        toast(on ? 'Sync an – Titel werden geladen, die Playlist erscheint in Jellyfin' : 'Sync beendet – die Jellyfin-Playlist bleibt bestehen');
+        rerender();
+      })
+      .catch((err) => toast(`Fehler: ${err.message}`))
+      .finally(() => (syncToggle.disabled = false));
+    return;
+  }
+  const syncMode = t.closest('[data-sync-mode]');
+  if (syncMode) {
+    if (syncMode.classList.contains('on')) return;
+    const mode = syncMode.dataset.syncMode;
+    syncMode.parentElement.querySelectorAll('button').forEach((b) => (b.disabled = true));
+    api
+      .setSyncMode(syncMode.dataset.id, mode)
+      .then(() => {
+        toast(mode === 'keep' ? 'Alte Songs bleiben ab jetzt in der Playlist' : 'Playlist folgt jetzt exakt Spotify');
+        rerender();
+      })
+      .catch((err) => toast(`Fehler: ${err.message}`))
+      .finally(() => syncMode.parentElement?.querySelectorAll('button').forEach((b) => (b.disabled = false)));
+    return;
+  }
+  const syncRun = t.closest('[data-sync-run]');
+  if (syncRun) {
+    syncRun.disabled = true;
+    toast('Abgleich läuft …');
+    api
+      .runSync(syncRun.dataset.syncRun)
+      .then(() => {
+        toast('Abgleich fertig');
+        rerender();
+      })
+      .catch((err) => toast(`Fehler: ${err.message}`))
+      .finally(() => (syncRun.disabled = false));
+    return;
+  }
+
+  const rmImport = t.closest('[data-remove-import]');
+  if (rmImport) {
+    if (!confirm('Importierte Playlist aus der Bibliothek entfernen?')) return;
+    api.removeImport(rmImport.dataset.removeImport).then(() => {
+      toast('Playlist entfernt');
+      location.replace('#/library');
+    });
     return;
   }
 
@@ -339,7 +420,8 @@ function renderTime() {
 
 function renderSource() {
   const el = $('.now-source');
-  const label = { jellyfin: 'Bibliothek', youtube: 'Stream', preview: 'Vorschau · 30 s', none: 'Nicht verfügbar' }[player.source] ?? '';
+  const label =
+    { jellyfin: 'Bibliothek', youtube: 'Stream', soundcloud: 'SoundCloud', preview: 'Vorschau · 30 s', none: 'Nicht verfügbar' }[player.source] ?? '';
   el.textContent = label;
   el.classList.toggle('preview', player.source === 'preview');
 }
@@ -355,6 +437,7 @@ player.addEventListener('track', renderTrack);
 player.addEventListener('state', renderState);
 player.addEventListener('time', renderTime);
 player.addEventListener('source', renderSource);
+player.addEventListener('upgraded', () => toast('Ganzer Song geladen'));
 player.addEventListener('queue', renderModes);
 player.addEventListener('error', () => {
   const msg = player.lastError?.name === 'NotAllowedError' ? 'Zum Abspielen einmal auf Play tippen' : player.lastError?.message ?? 'Wiedergabefehler';

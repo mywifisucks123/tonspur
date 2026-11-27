@@ -1,0 +1,57 @@
+# Kompletter Musik-Stack für einen Homeserver (z. B. ThinkCentre mit Debian + Docker):
+#   Jellyfin  – Bibliothek und Server für Apps wie Finamp
+#   Deemix    – lädt Titel von Deezer in den Musikordner
+#   Tonspur   – Spotify-Sync, Suche, Downloads (Web-App optional)
+#
+# Start:  docker compose -f homeserver.compose.yml up -d --build
+# Ordner: ./music (Musik), ./data (Tonspur), ./jellyfin, ./deemix (Einstellungen)
+# Anderer Musikordner: MUSIC_HOST_DIR=/pfad/zur/musik in die .env
+
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: jellyfin
+    restart: unless-stopped
+    ports:
+      - "8096:8096"
+    volumes:
+      - ./jellyfin/config:/config
+      - ./jellyfin/cache:/cache
+      - ${MUSIC_HOST_DIR:-./music}:/media/music
+    # Intel Quick Sync für Video-Umwandlung – nur einschalten, wenn /dev/dri existiert
+    # devices:
+    #   - /dev/dri:/dev/dri
+
+  deemix:
+    image: registry.gitlab.com/bockiii/deemix-docker:latest
+    container_name: deemix
+    restart: unless-stopped
+    ports:
+      - "6595:6595"
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      UMASK_SET: "022"
+      DEEMIX_SINGLE_USER: "true"
+    volumes:
+      - ./deemix/config:/config
+      - ${MUSIC_HOST_DIR:-./music}:/downloads
+
+  tonspur:
+    build: .
+    container_name: tonspur
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      JELLYFIN_URL: http://jellyfin:8096
+      DEEMIX_URL: http://deemix:6595
+      MUSIC_DIR: /music
+    ports:
+      # Belegt schon ein anderer Dienst Port 3000: TONSPUR_PORT=8787 (o. ä.) in die .env
+      - "${TONSPUR_PORT:-3000}:3000"
+    volumes:
+      - ./data:/app/data
+      - ${MUSIC_HOST_DIR:-./music}:/music
+    depends_on:
+      - jellyfin
+      - deemix

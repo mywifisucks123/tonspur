@@ -1,8 +1,8 @@
 FROM node:22-alpine
 
-# yt-dlp für die Sofort-Wiedergabe. "default"-Extras enthalten yt-dlp-ejs;
+# yt-dlp für die Sofort-Wiedergabe, ffmpeg für SoundCloud. "default"-Extras enthalten yt-dlp-ejs;
 # als JS-Runtime nimmt das Backend automatisch das Node dieses Images.
-RUN apk add --no-cache python3 py3-pip ca-certificates \
+RUN apk add --no-cache python3 py3-pip ca-certificates ffmpeg \
  && pip install --no-cache-dir --break-system-packages "yt-dlp[default]"
 
 WORKDIR /app
