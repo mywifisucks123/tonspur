@@ -50,25 +50,77 @@ async function get(url) {
   throw new Error('LRCLIB drosselt dauerhaft');
 }
 
-/** Bester Treffer: erst exakte Abfrage (Titel, Künstler, Album, Dauer), dann freie Suche. */
-async function find({ title, artist, album, duration }) {
-  const q = (o) => new URLSearchParams(Object.entries(o).filter(([, v]) => v)).toString();
-  const exact = await get(`${API}/get?${q({ track_name: title, artist_name: artist, album_name: album, duration })}`);
-  if (exact && (exact.syncedLyrics || exact.plainLyrics || exact.instrumental)) return exact;
-  await sleep(GAP_MS);
+// --- Abgleich ----------------------------------------------------------------
+// Häufige Gründe für "nicht gefunden": Künstler-Tag mit mehreren Namen ("David Guetta; Sia",
+// "A feat. B"), Titelzusätze ("- Radio Edit", "(Main Version)"), anderes Album oder eine
+// Radio-Version mit ein paar Sekunden Unterschied. Deshalb mehrere Anfragen, lockerer Vergleich.
 
-  const clean = cleanTitle(title);
-  const list = (await get(`${API}/search?${q({ track_name: clean, artist_name: artist })}`)) ?? [];
-  const na = norm(artist);
-  const nt = norm(clean);
-  const fits = list.filter((r) => {
+const SPLIT_ARTISTS = /\s*(?:,|;|\/|&|\+|\bfeat\.?|\bft\.?|\bfeaturing\b|\bx\b|\bvs\.?|\bund\b|\band\b)\s*/i;
+
+function artistList(raw) {
+  const out = [];
+  for (const a of raw) for (const part of String(a ?? '').split(SPLIT_ARTISTS)) if (part.trim()) out.push(part.trim());
+  return [...new Set(out)];
+}
+
+const stripDash = (t) => t.replace(/\s+[-–]\s+.*$/, '').trim() || t;
+const stripBrackets = (t) => t.replace(/\s*[([][^)\]]*[)\]]/g, '').trim() || t;
+const words = (t) => norm(t).split(' ').filter(Boolean);
+
+function titleFits(want, got) {
+  const a = norm(want);
+  const b = norm(cleanTitle(stripBrackets(got)));
+  if (!a || !b) return false;
+  if (a === b || norm(cleanTitle(got)) === a) return true;
+  // alle Wörter des kürzeren Titels im längeren ("Nocturne Op. 9 No. 2" ↔ "Nocturne in E-Flat, Op. 9 No. 2")
+  const [s, l] = words(a).length <= words(b).length ? [words(a), new Set(words(b))] : [words(b), new Set(words(a))];
+  return s.length >= 2 && s.every((w) => l.has(w));
+}
+
+/** Bester Treffer aus einer LRCLIB-Liste: Titel und Künstler passen, Länge ±10 s, mitlaufend bevorzugt. */
+function pick(list, { titles, artists, duration }) {
+  const na = artists.map(norm).filter(Boolean);
+  const fits = (list ?? []).filter((r) => {
+    if (!r.syncedLyrics && !r.plainLyrics && !r.instrumental) return false;
     const ra = norm(r.artistName ?? '');
-    const artistOk = !na || ra.includes(na) || na.includes(ra);
-    const titleOk = norm(cleanTitle(r.trackName ?? '')) === nt;
-    const durOk = !duration || !r.duration || Math.abs(r.duration - duration) <= 4;
-    return artistOk && titleOk && durOk;
+    const artistOk = !na.length || na.some((a) => ra.includes(a) || a.includes(ra));
+    const durOk = !duration || !r.duration || Math.abs(r.duration - duration) <= 10;
+    return artistOk && durOk && titles.some((t) => titleFits(t, r.trackName ?? ''));
   });
-  return fits.find((r) => r.syncedLyrics) ?? fits.find((r) => r.plainLyrics) ?? null;
+  const diff = (r) => (duration && r.duration ? Math.abs(r.duration - duration) : 5);
+  fits.sort((x, y) => Number(Boolean(y.syncedLyrics)) - Number(Boolean(x.syncedLyrics)) || diff(x) - diff(y));
+  return fits[0] ?? null;
+}
+
+async function find({ title, artists: rawArtists, album, duration }) {
+  const q = (o) => new URLSearchParams(Object.entries(o).filter(([, v]) => v)).toString();
+  const artists = artistList(rawArtists);
+  const artist = artists[0] ?? '';
+  const titles = [...new Set([title, cleanTitle(title), stripDash(title), stripBrackets(cleanTitle(title))])];
+  const clean = stripBrackets(cleanTitle(title));
+  const want = { titles, artists, duration };
+  const ok = (r) => r && (r.syncedLyrics || r.plainLyrics || r.instrumental);
+
+  // 1. exakt wie getaggt (Künstler-Tag ungeteilt, z. B. "Simon & Garfunkel")
+  let r = await get(`${API}/get?${q({ track_name: title, artist_name: rawArtists[0] ?? artist, album_name: album, duration })}`);
+  if (ok(r)) return r;
+  // 2. bereinigter Titel, ohne Album
+  if (clean !== title || album) {
+    await sleep(GAP_MS);
+    r = await get(`${API}/get?${q({ track_name: clean, artist_name: artist, duration })}`);
+    if (ok(r) && pick([r], want)) return r;
+  }
+  // 3. Suche nach Titel + Hauptkünstler
+  await sleep(GAP_MS);
+  let hit = pick(await get(`${API}/search?${q({ track_name: clean, artist_name: artist })}`), want);
+  if (hit) return hit;
+  // 4. Freitextsuche (findet auch, wenn LRCLIB Künstler anders schreibt)
+  await sleep(GAP_MS);
+  hit = pick(await get(`${API}/search?${q({ q: `${artist} ${clean}`.trim() })}`), want);
+  if (hit) return hit;
+  // 5. nur der Titel – Künstler muss dann trotzdem passen
+  await sleep(GAP_MS);
+  return pick(await get(`${API}/search?${q({ track_name: clean })}`), want);
 }
 
 const AUDIO = /\.(mp3|m4a|flac|ogg|opus|aac|wav)$/i;
@@ -82,10 +134,10 @@ async function one(item) {
 
   // Künstler: Tag, sonst Album-Künstler, sonst Ordnername (<Künstler>/<Album>/<Datei>)
   const parts = file.split(path.sep);
-  const artist = item.Artists?.[0] || item.AlbumArtist || parts[parts.length - 3] || '';
+  const artists = item.Artists?.length ? item.Artists : [item.AlbumArtist || parts[parts.length - 3] || ''];
   const hit = await find({
     title: item.Name,
-    artist,
+    artists,
     album: item.Album,
     duration: item.RunTimeTicks ? Math.round(item.RunTimeTicks / 1e7) : null,
   });
@@ -113,7 +165,7 @@ export async function run({ retryNone = false } = {}) {
     for (const item of todo) {
       try {
         const s = await one(item);
-        if (s) state[item.Id] = { s, at: Date.now() };
+        if (s) state[item.Id] = { s, at: Date.now(), n: `${item.Artists?.[0] ?? item.AlbumArtist ?? ''} – ${item.Name}` };
         if (s === 'synced' || s === 'plain') progress.found++;
       } catch (err) {
         log('lyrics', `${item.Name}: ${err.message}`);
@@ -134,10 +186,14 @@ export async function run({ retryNone = false } = {}) {
 export function status() {
   const c = { synced: 0, plain: 0, had: 0, none: 0, instrumental: 0 };
   for (const e of Object.values(state)) c[e.s] = (c[e.s] ?? 0) + 1;
-  return { running, progress, counts: c };
+  const missing = Object.values(state).filter((e) => e.s === 'none' && e.n).map((e) => e.n).sort((x, y) => x.localeCompare(y, 'de'));
+  return { running, progress, counts: c, missing };
 }
 
 export function start(opts) {
   if (!running) run(opts).catch((err) => log('lyrics', err.message));
   return status();
 }
+
+// Nur für Tests
+export const _test = { artistList, titleFits, pick };

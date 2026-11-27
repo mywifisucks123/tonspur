@@ -840,6 +840,7 @@ export function libraryView(initialTab, message) {
     return html`<div class="panel-title">Songtexte</div>
       <div class="panel-sub">Tonspur holt Songtexte von LRCLIB und legt sie neben die Musikdateien – Finamp zeigt sie mitlaufend. Neue Songs bekommen ihren Text automatisch.</div>
       <div class="panel-sub">${c.synced} mitlaufend · ${c.plain} nur Text · ${c.had} hatten schon einen · ${c.none} nicht gefunden${c.instrumental ? ` · ${c.instrumental} instrumental` : ''}</div>
+      ${ly.missing?.length ? `<details><summary>Nicht gefunden anzeigen</summary>${ly.missing.map((n) => `<div>${esc(n)}</div>`).join('')}</details>` : ''}
       ${ly.running && p ? `<div class="panel-sub">Suche läuft: ${p.done} von ${p.total} (${p.found} gefunden) – etwa 1 Song pro Sekunde</div>` : ''}
       <div class="row-buttons">
         ${ly.running ? '' : '<button class="btn small" data-lyrics-run>Jetzt suchen</button>'}
